@@ -56,7 +56,9 @@ final class DB {
             t_input REAL,
             t_output REAL,
             t_cache_write REAL,
-            t_cache_read REAL
+            t_cache_read REAL,
+            -- pricing.json's top-level multiplier, e.g. 1.1 for Bedrock regional endpoints.
+            mult REAL NOT NULL DEFAULT 1
         );
         CREATE TABLE IF NOT EXISTS files(
             path TEXT PRIMARY KEY,

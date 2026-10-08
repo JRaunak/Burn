@@ -25,6 +25,7 @@ final class Pricing {
                   let models = root["models"] as? [String: Any] else {
                 throw DBError(description: "pricing.json needs a \"models\" object")
             }
+            let mult = (root["multiplier"] as? NSNumber)?.doubleValue ?? 1
             try db.transaction {
                 try db.run("DELETE FROM prices")
                 for (model, value) in models {
@@ -37,9 +38,9 @@ final class Pricing {
                     let tierArgs: [Any?] = try tier.map {
                         [try n($0, "tokens"), try n($0, "input"), try n($0, "output"), try n($0, "cacheWrite"), try n($0, "cacheRead")]
                     } ?? [nil, nil, nil, nil, nil]
-                    try db.run("INSERT INTO prices VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                    try db.run("INSERT INTO prices VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                                [normalizeModel(model), try n(p, "input"), try n(p, "output"),
-                                try n(p, "cacheWrite"), try n(p, "cacheRead"), p["source"] as? String ?? ""] + tierArgs)
+                                try n(p, "cacheWrite"), try n(p, "cacheRead"), p["source"] as? String ?? ""] + tierArgs + [mult])
                 }
             }
             error = nil

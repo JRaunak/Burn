@@ -59,9 +59,10 @@ enum Q {
     static let from = "FROM messages m LEFT JOIN prices p ON p.model = m.model"
     private static let tiered = "(p.tier_tokens IS NOT NULL AND m.input + m.cache_write + m.cache_read > p.tier_tokens)"
     static let cost = """
-        COALESCE(m.cost, CASE WHEN \(tiered)
+        (COALESCE(m.cost, CASE WHEN \(tiered)
             THEN (m.input*p.t_input + m.output*p.t_output + m.cache_write*p.t_cache_write + m.cache_read*p.t_cache_read)/1e6
             ELSE (m.input*p.input + m.output*p.output + m.cache_write*p.cache_write + m.cache_read*p.cache_read)/1e6 END)
+         * COALESCE(p.mult, 1))
         """
     static let tokens = "(m.input + m.output + m.cache_write + m.cache_read)"
     static let unpriced = "CASE WHEN m.cost IS NULL AND p.model IS NULL THEN \(tokens) ELSE 0 END"
