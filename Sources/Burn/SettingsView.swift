@@ -14,6 +14,13 @@ struct SettingsView: View {
 
     var body: some View {
         Form {
+            Section("General") {
+                Toggle("Open at login", isOn: Binding(get: { status.login }, set: { on in
+                    status.text = LoginItem.set(on) ?? ""
+                    status.login = LoginItem.enabled
+                }))
+            }
+
             Section("Pricing") {
                 Text(model.pricing.url.path).font(.caption).textSelection(.enabled)
                 HStack {
@@ -72,4 +79,5 @@ struct SettingsView: View {
 
 final class Note: ObservableObject {
     @Published var text = ""
+    @Published var login = LoginItem.enabled
 }

@@ -3,6 +3,7 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleExecutable</key><string>Burn</string>
+    <key>CFBundleIconFile</key><string>Burn</string>
     <key>CFBundleIdentifier</key><string>local.burn</string>
     <key>CFBundleName</key><string>Burn</string>
     <key>CFBundlePackageType</key><string>APPL</string>

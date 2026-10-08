@@ -1,5 +1,6 @@
 #!/bin/bash
 # Usage: ./build.sh [install]
+# BURN_VERSION=0.2 sets the version shown in Finder.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -12,6 +13,22 @@ mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$bin" "$app/Contents/MacOS/Burn"
 cp Resources/Info.plist "$app/Contents/Info.plist"
 cp Resources/pricing.json "$app/Contents/Resources/pricing.json"
+cp Resources/Burn.icns "$app/Contents/Resources/Burn.icns"
+# Full Xcode can compile the Liquid Glass icon; the Command Line Tools can't, so the .icns stands in.
+# actool in some Xcode 26 releases crashes on .icon files, which also falls back to the .icns.
+if xcrun --find actool >/dev/null 2>&1; then
+    if xcrun actool Resources/Burn.icon --compile "$app/Contents/Resources" --platform macosx \
+        --minimum-deployment-target 14.0 --app-icon Burn --include-all-app-icons \
+        --output-partial-info-plist build/icon.plist >/dev/null; then
+        /usr/libexec/PlistBuddy -c "Add :CFBundleIconName string Burn" "$app/Contents/Info.plist"
+    else
+        echo "actool failed; using Resources/Burn.icns" >&2
+        cp Resources/Burn.icns "$app/Contents/Resources/Burn.icns"
+    fi
+fi
+if [ -n "${BURN_VERSION:-}" ]; then
+    /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $BURN_VERSION" "$app/Contents/Info.plist"
+fi
 codesign --force --sign - "$app"
 echo "built $app"
 

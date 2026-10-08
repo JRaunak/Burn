@@ -2,7 +2,7 @@ import SwiftUI
 
 struct PopoverView: View {
     @EnvironmentObject var model: AppModel
-    @Environment(\.openWindow) private var openWindow
+    let close: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -45,15 +45,14 @@ struct PopoverView: View {
 
             Divider()
             HStack {
-                Button("History") { bringForward(); openWindow(id: "history") }
-                Button("Settings") { bringForward(); openWindow(id: "settings") }
+                Button("History") { close(); Windows.shared.show("history") }
+                Button("Settings") { close(); Windows.shared.show("settings") }
                 Spacer()
                 Button("Quit") { NSApp.terminate(nil) }
             }
         }
         .padding(14)
         .frame(width: 320)
-        .onAppear { model.refresh() }
     }
 }
 

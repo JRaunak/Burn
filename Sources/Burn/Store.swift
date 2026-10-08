@@ -24,7 +24,7 @@ struct Filter: Equatable {
     }
 }
 
-struct Slice: Identifiable {
+struct Slice: Identifiable, Equatable {
     var id: String { name }
     let name: String
     let cost: Double
@@ -47,7 +47,7 @@ struct SessionRow: Identifiable {
     let unpricedTokens: Int
 }
 
-struct Summary {
+struct Summary: Equatable {
     var cost = 0.0
     var tokens = 0
     var unpricedTokens = 0
@@ -114,6 +114,8 @@ final class AppModel: ObservableObject {
     @Published var todayModels: [Slice] = []
     @Published var todayAgents: [Slice] = []
     @Published var errors: [String] = []
+    /// Separate object so a frame tick redraws only the menu-bar label.
+    let flame = FlameFrame()
     @Published var source = UserDefaults.standard.string(forKey: "source") ?? Sources.transcripts {
         didSet { UserDefaults.standard.set(source, forKey: "source"); refresh() }
     }
@@ -126,6 +128,10 @@ final class AppModel: ObservableObject {
     private var timer: Timer?
     private let refreshQueue = DispatchQueue(label: "burn.refresh", qos: .utility)
     private var pending = false
+    private var flicker: Timer?
+    private var cool: Timer?
+    private var lastUsage: Double = 0
+    private var flickeredFor: Double = 0
 
     var activeSource: UsageSource {
         switch source {
@@ -191,11 +197,62 @@ final class AppModel: ObservableObject {
                     Q.breakdown(db, t, by: "m.model"),
                     Q.breakdown(db, t, by: "CASE WHEN m.sidechain=1 THEN 'Subagents' ELSE 'Main agent' END"))
         }
+        let latest = db.queue.sync { (try? db.run("SELECT MAX(ts) FROM messages WHERE source=?", [source]))?.first?.dbl(0) ?? 0 }
         let errs = [pricing.error, transcripts.lastError, Settings.bedrockEnabled ? bedrock.lastError : nil, otel?.lastError].compactMap { $0 }
         DispatchQueue.main.async {
-            (self.today, self.month, self.todayProjects, self.todayModels, self.todayAgents) = result
-            self.errors = errs
+            // Assigning equal values still fires objectWillChange and re-renders the popover.
+            if self.today != result.0 { self.today = result.0 }
+            if self.month != result.1 { self.month = result.1 }
+            if self.todayProjects != result.2 { self.todayProjects = result.2 }
+            if self.todayModels != result.3 { self.todayModels = result.3 }
+            if self.todayAgents != result.4 { self.todayAgents = result.4 }
+            if self.errors != errs { self.errors = errs }
+            self.lastUsage = latest
+            self.updateFlicker()
         }
+    }
+
+    /// One flicker cycle each time new usage lands. On macOS 26 every status-item image change
+    /// redraws all menu-bar replicants, so continuous animation cost about 8% CPU.
+    private func updateFlicker() {
+        let now = Date().timeIntervalSince1970
+        cool?.invalidate()
+        flame.lit = now - lastUsage < Self.litFor
+        if flame.lit {
+            cool = Timer.scheduledTimer(withTimeInterval: Self.litFor - (now - lastUsage), repeats: false) { [weak self] _ in
+                self?.flame.lit = false
+            }
+        }
+        guard lastUsage > flickeredFor, flicker == nil else { return }
+        let first = flickeredFor == 0
+        flickeredFor = lastUsage
+        guard !first, now - lastUsage < 60 else { return }
+        flame.index = 0
+        flicker = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] t in
+            guard let self, let i = self.flame.index else { return }
+            if i + 1 < FlameGlyph.frames.count {
+                self.flame.index = i + 1
+            } else {
+                t.invalidate()
+                self.flicker = nil
+                self.flame.index = nil
+            }
+        }
+    }
+
+    /// Pauses between tool calls are shorter than this, so the icon doesn't blink grey mid-session.
+    private static let litFor: Double = 120
+}
+
+final class FlameFrame: ObservableObject {
+    /// Set while a flicker cycle plays.
+    @Published var index: Int?
+    /// Colour while spend is landing, monochrome otherwise.
+    @Published var lit = false
+
+    var image: NSImage {
+        if let i = index { return FlameGlyph.frames[i] }
+        return lit ? FlameGlyph.lit : FlameGlyph.idle
     }
 }
 

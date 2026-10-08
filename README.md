@@ -4,16 +4,45 @@ Burn is a macOS menu-bar app that shows how much you've spent on Claude Code tod
 
 ## Install
 
-You need the Xcode Command Line Tools and macOS 14 or later. Burn has been built with Swift 6.4. Full Xcode and an Apple developer account aren't needed.
+On an Apple Silicon Mac with macOS 14 or later:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/JRaunak/Burn/master/install.sh | bash
+```
+
+This downloads the latest release into `~/Applications/Burn.app` and opens it. Releases are ad-hoc signed, not notarized. Files fetched with `curl` don't get the quarantine attribute, so Gatekeeper doesn't block the app. Downloading the same archive in a browser does set it, and macOS will then refuse to open it.
+
+To build from source instead, you need the Xcode Command Line Tools. Full Xcode and an Apple developer account aren't needed.
 
 ```sh
 ./build.sh           # builds release and writes an ad-hoc signed build/Burn.app
 ./build.sh install   # also copies it to ~/Applications/Burn.app and opens it
 ```
 
-`install` quits a running Burn first. Because the app is built on your Mac it carries no quarantine attribute, so Gatekeeper doesn't block it.
+`install` quits a running Burn first.
 
 Burn doesn't register itself to launch at login. Add it under System Settings > General > Login Items.
+
+## Menu bar
+
+The flame next to the total is monochrome while nothing is being spent. It turns terracotta while usage is landing, and stays that way until two minutes after the last spend. Each new charge plays one short flicker. Burn doesn't animate continuously, because on macOS 26 every status-item image change redraws the item on each menu bar, which cost about 8% CPU.
+
+## Icon
+
+`FlameGlyph.swift` draws both the menu-bar flame and the app icon. After changing it, run `scripts/make-icon.sh` to regenerate `Resources/Burn.icns` and the layers in `Resources/Burn.icon`.
+
+`Burn.icon` is a Liquid Glass icon with light and dark appearances. Compiling it needs `actool` from full Xcode, so release builds use it and builds made with the Command Line Tools fall back to the dark `Burn.icns`.
+
+## Releasing
+
+Push a tag starting with `v`:
+
+```sh
+git tag v0.2
+git push origin v0.2
+```
+
+`.github/workflows/release.yml` builds on a `macos-26` runner with Xcode 26.2, stamps the version from the tag, and attaches `Burn.tar.gz` to a GitHub release. `install.sh` always fetches the latest release.
 
 ## How cost is computed
 
