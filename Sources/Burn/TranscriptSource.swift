@@ -6,6 +6,7 @@ final class TranscriptSource: UsageSource {
     let label = "Claude Code transcripts"
     let caveat = "Only usage Claude Code wrote to ~/.claude/projects. Background calls it doesn't log, and transcripts deleted before Burn first ran, are missing."
     private(set) var lastError: String?
+    private(set) var scanning = false
 
     private let db: DB
     private let root = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude/projects")
@@ -61,13 +62,17 @@ final class TranscriptSource: UsageSource {
 
     private func scanAll() {
         guard let e = FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil) else { return }
+        // Only a scan with nothing stored yet shows as indexing; a launch-time catch-up is quick.
+        scanning = db.queue.sync { (try? db.run("SELECT COUNT(*) FROM files"))?.first?.int(0) ?? 0 } == 0
+        if scanning { onChange() }
+        defer { scanning = false; onChange() }
         var any = false
         for case let url as URL in e where url.pathExtension == "jsonl" {
             any = ingest(url) || any
         }
         // The first full scan leaves hundreds of MB of freed large blocks cached by malloc.
         malloc_zone_pressure_relief(nil, 0)
-        if any { onChange() }
+        _ = any
     }
 
     /// Reads whatever was appended since the stored offset. Returns true if rows were written.

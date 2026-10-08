@@ -9,12 +9,13 @@ struct PopoverView: View {
             HStack(alignment: .firstTextBaseline) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Today").font(.caption).foregroundStyle(.secondary)
-                    Text(usd(model.today.cost)).font(.system(size: 30, weight: .semibold, design: .rounded)).monospacedDigit()
+                    Text(model.scanning ? "Indexing…" : usd(model.today.cost) + plus(model.today))
+                        .font(.system(size: 30, weight: .semibold, design: .rounded)).monospacedDigit()
                 }
                 Spacer()
                 VStack(alignment: .trailing, spacing: 2) {
                     Text("This month").font(.caption).foregroundStyle(.secondary)
-                    Text(usd(model.month.cost)).font(.title3).monospacedDigit()
+                    Text(model.scanning ? "…" : usd(model.month.cost) + plus(model.month)).font(.title3).monospacedDigit()
                 }
             }
 
@@ -24,7 +25,10 @@ struct PopoverView: View {
             .pickerStyle(.menu)
             .labelsHidden()
 
-            if model.today.cost == 0 && model.todayProjects.isEmpty {
+            if model.scanning {
+                Text("Reading your Claude Code transcripts for the first time. Totals fill in as it goes.")
+                    .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            } else if model.today.cost == 0 && model.todayProjects.isEmpty {
                 Text("No usage today.").foregroundStyle(.secondary)
             } else {
                 SliceList(title: "Projects", slices: model.todayProjects)
@@ -32,10 +36,14 @@ struct PopoverView: View {
                 SliceList(title: "Agents", slices: model.todayAgents)
             }
 
-            if model.today.unpricedTokens > 0 {
-                Label("\(tokens(model.today.unpricedTokens)) tokens today have no price (\(model.today.unpricedModels.joined(separator: ", "))). Add them to pricing.json.",
-                      systemImage: "exclamationmark.triangle")
-                    .font(.caption).foregroundStyle(.orange)
+            if model.month.unpricedTokens > 0 {
+                Label {
+                    Text("\(tokens(model.today.unpricedTokens)) tokens today and \(tokens(model.month.unpricedTokens)) this month have no price (\(model.month.unpricedModels.joined(separator: ", "))). Add them to pricing.json.")
+                        .fixedSize(horizontal: false, vertical: true)
+                } icon: {
+                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                }
+                .font(.caption)
             }
             ForEach(model.errors, id: \.self) { e in
                 Label(e, systemImage: "xmark.octagon").font(.caption).foregroundStyle(.red).lineLimit(3)
@@ -55,6 +63,8 @@ struct PopoverView: View {
         .frame(width: 320)
     }
 }
+
+private func plus(_ s: Summary) -> String { s.unpricedTokens > 0 ? "+" : "" }
 
 struct SliceList: View {
     let title: String

@@ -5,7 +5,8 @@ struct Filter: Equatable {
     enum Agent: String, CaseIterable { case all = "All", main = "Main agent", sub = "Subagents" }
     var source = Sources.transcripts
     var from = Calendar.current.date(byAdding: .day, value: -29, to: Calendar.current.startOfDay(for: Date()))!
-    var to = Calendar.current.startOfDay(for: Date())
+    /// nil means through today, so a window left open past midnight keeps including today.
+    var to: Date?
     var project = ""
     var session = ""
     var model = ""
@@ -13,7 +14,7 @@ struct Filter: Equatable {
 
     /// `to` is inclusive of that whole local day.
     func sql() -> (String, [Any?]) {
-        let end = Calendar.current.date(byAdding: .day, value: 1, to: Calendar.current.startOfDay(for: to))!
+        let end = Calendar.current.date(byAdding: .day, value: 1, to: Calendar.current.startOfDay(for: to ?? Date()))!
         var w = ["m.source = ?", "m.ts >= ?", "m.ts < ?"]
         var args: [Any?] = [source, Calendar.current.startOfDay(for: from).timeIntervalSince1970, end.timeIntervalSince1970]
         if !project.isEmpty { w.append("m.project = ?"); args.append(project) }
@@ -56,7 +57,12 @@ struct Summary: Equatable {
 
 enum Q {
     static let from = "FROM messages m LEFT JOIN prices p ON p.model = m.model"
-    static let cost = "COALESCE(m.cost, (m.input*p.input + m.output*p.output + m.cache_write*p.cache_write + m.cache_read*p.cache_read)/1e6)"
+    private static let tiered = "(p.tier_tokens IS NOT NULL AND m.input + m.cache_write + m.cache_read > p.tier_tokens)"
+    static let cost = """
+        COALESCE(m.cost, CASE WHEN \(tiered)
+            THEN (m.input*p.t_input + m.output*p.t_output + m.cache_write*p.t_cache_write + m.cache_read*p.t_cache_read)/1e6
+            ELSE (m.input*p.input + m.output*p.output + m.cache_write*p.cache_write + m.cache_read*p.cache_read)/1e6 END)
+        """
     static let tokens = "(m.input + m.output + m.cache_write + m.cache_read)"
     static let unpriced = "CASE WHEN m.cost IS NULL AND p.model IS NULL THEN \(tokens) ELSE 0 END"
 
@@ -70,10 +76,14 @@ enum Q {
         return s
     }
 
+    /// Top rows plus an "Other" row, so the list adds up to the total.
     static func breakdown(_ db: DB, _ f: Filter, by column: String, limit: Int = 6) -> [Slice] {
         let (w, a) = f.sql()
-        let rows = (try? db.run("SELECT \(column), COALESCE(SUM(\(cost)),0) AS c \(from) WHERE \(w) GROUP BY 1 ORDER BY c DESC LIMIT \(limit)", a)) ?? []
-        return rows.map { Slice(name: $0.str(0), cost: $0.dbl(1)) }
+        let rows = (try? db.run("SELECT \(column), COALESCE(SUM(\(cost)),0) AS c \(from) WHERE \(w) GROUP BY 1 ORDER BY c DESC", a)) ?? []
+        let slices = rows.map { Slice(name: $0.str(0), cost: $0.dbl(1)) }
+        guard slices.count > limit else { return slices }
+        let rest = slices[(limit - 1)...].reduce(0) { $0 + $1.cost }
+        return Array(slices.prefix(limit - 1)) + [Slice(name: "Other", cost: rest)]
     }
 
     static func daily(_ db: DB, _ f: Filter) -> [DayCost] {
@@ -114,6 +124,8 @@ final class AppModel: ObservableObject {
     @Published var todayModels: [Slice] = []
     @Published var todayAgents: [Slice] = []
     @Published var errors: [String] = []
+    /// True while transcripts are being read from scratch, when totals are still partial.
+    @Published var scanning = false
     /// Separate object so a frame tick redraws only the menu-bar label.
     let flame = FlameFrame()
     @Published var source = UserDefaults.standard.string(forKey: "source") ?? Sources.transcripts {
@@ -187,7 +199,6 @@ final class AppModel: ObservableObject {
         let cal = Calendar.current
         var t = Filter(source: source)
         t.from = cal.startOfDay(for: Date())
-        t.to = t.from
         var m = t
         m.from = cal.date(from: cal.dateComponents([.year, .month], from: Date()))!
         let result = db.queue.sync { () -> (Summary, Summary, [Slice], [Slice], [Slice]) in
@@ -198,6 +209,7 @@ final class AppModel: ObservableObject {
                     Q.breakdown(db, t, by: "CASE WHEN m.sidechain=1 THEN 'Subagents' ELSE 'Main agent' END"))
         }
         let latest = db.queue.sync { (try? db.run("SELECT MAX(ts) FROM messages WHERE source=?", [source]))?.first?.dbl(0) ?? 0 }
+        let scanning = source == Sources.transcripts && transcripts.scanning
         let errs = [pricing.error, transcripts.lastError, Settings.bedrockEnabled ? bedrock.lastError : nil, otel?.lastError].compactMap { $0 }
         DispatchQueue.main.async {
             // Assigning equal values still fires objectWillChange and re-renders the popover.
@@ -207,6 +219,7 @@ final class AppModel: ObservableObject {
             if self.todayModels != result.3 { self.todayModels = result.3 }
             if self.todayAgents != result.4 { self.todayAgents = result.4 }
             if self.errors != errs { self.errors = errs }
+            if self.scanning != scanning { self.scanning = scanning }
             self.lastUsage = latest
             self.updateFlicker()
         }

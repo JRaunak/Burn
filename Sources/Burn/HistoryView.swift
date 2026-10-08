@@ -11,13 +11,23 @@ struct HistoryView: View {
             HStack(spacing: 24) {
                 stat("Total", usd(h.summary.cost))
                 stat("Tokens", tokens(h.summary.tokens))
-                stat("Days", "\(Set(h.daily.map(\.day)).count)")
+                stat("Active days", "\(Set(h.daily.map(\.day)).count)")
                 if h.summary.unpricedTokens > 0 {
-                    stat("Unpriced tokens", tokens(h.summary.unpricedTokens)).foregroundStyle(.orange)
+                    VStack(alignment: .leading) {
+                        Label("Unpriced tokens", systemImage: "exclamationmark.triangle.fill")
+                            .font(.caption).foregroundStyle(.secondary)
+                        Text(tokens(h.summary.unpricedTokens)).font(.title2).monospacedDigit()
+                    }
                 }
                 Spacer()
             }
-            DailyChart(days: h.daily).frame(height: 220)
+            DailyChart(days: h.daily)
+                .frame(height: 220)
+                .overlay {
+                    if h.loaded && h.daily.isEmpty {
+                        Text("No usage in this range").foregroundStyle(.secondary)
+                    }
+                }
 
             Table(h.sessions) {
                 TableColumn("Started") { Text($0.start, format: .dateTime.day().month().hour().minute()) }
@@ -29,7 +39,7 @@ struct HistoryView: View {
                 }
                 .width(80)
                 TableColumn("Messages") { Text("\($0.messages)").monospacedDigit() }.width(70)
-                TableColumn("Subagents") { Text($0.subagentShare, format: .percent.precision(.fractionLength(0))).monospacedDigit() }.width(70)
+                TableColumn("Subagent share") { Text($0.subagentShare, format: .percent.precision(.fractionLength(0))).monospacedDigit() }.width(95)
                 TableColumn("Cost") { s in
                     Text(usd(s.cost) + (s.unpricedTokens > 0 ? "+" : "")).monospacedDigit()
                 }
@@ -43,6 +53,12 @@ struct HistoryView: View {
         .frame(minWidth: 860, minHeight: 600)
         .onAppear { h.filter.source = model.source; load() }
         .onChange(of: h.filter) { load() }
+        // Project, model and session lists differ per source, so stale picks would show nothing.
+        .onChange(of: h.filter.source) {
+            h.filter.project = ""
+            h.filter.model = ""
+            h.filter.session = ""
+        }
         .onChange(of: model.today.cost) { load() }
     }
 
@@ -52,8 +68,8 @@ struct HistoryView: View {
                 ForEach(Sources.all, id: \.self) { Text(Sources.label($0)).tag($0) }
             }
             .frame(width: 230)
-            DatePicker("From", selection: $h.filter.from, displayedComponents: .date)
-            DatePicker("To", selection: $h.filter.to, displayedComponents: .date)
+            DatePicker("From", selection: $h.filter.from, in: ...(h.filter.to ?? Date()), displayedComponents: .date)
+            DatePicker("To", selection: toDate, in: h.filter.from...Date(), displayedComponents: .date)
             Picker("Project", selection: $h.filter.project) {
                 Text("All").tag("")
                 ForEach(h.projects, id: \.self) { Text($0).tag($0) }
@@ -70,6 +86,12 @@ struct HistoryView: View {
             }
         }
         .controlSize(.small)
+    }
+
+    /// Picking today stores nil, so the range keeps following today.
+    private var toDate: Binding<Date> {
+        Binding(get: { h.filter.to ?? Date() },
+                set: { h.filter.to = Calendar.current.isDateInToday($0) ? nil : $0 })
     }
 
     private func stat(_ title: String, _ value: String) -> some View {
@@ -107,6 +129,7 @@ final class HistoryModel: ObservableObject {
     @Published var sessions: [SessionRow] = []
     @Published var projects: [String] = []
     @Published var models: [String] = []
+    @Published var loaded = false
 
     func load(_ db: DB) {
         let f = filter
@@ -118,6 +141,7 @@ final class HistoryModel: ObservableObject {
             DispatchQueue.main.async {
                 guard f == self.filter else { return }
                 (self.summary, self.daily, self.sessions, self.projects, self.models) = r
+                self.loaded = true
             }
         }
     }

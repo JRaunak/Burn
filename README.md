@@ -21,7 +21,7 @@ To build from source instead, you need the Xcode Command Line Tools. Full Xcode 
 
 `install` quits a running Burn first.
 
-Burn doesn't register itself to launch at login. Add it under System Settings > General > Login Items.
+The first time Burn runs from `/Applications` or `~/Applications`, it adds itself as a login item. macOS shows a notification when it does. Turn it off with "Open at login" in Burn's Settings, or under System Settings > General > Login Items. A managed Mac can block login items by policy; Settings shows the error if it does.
 
 ## Menu bar
 
@@ -52,7 +52,7 @@ Prices come from `~/Library/Application Support/Burn/pricing.json`, in USD per m
 
 The bundled copy is only copied there on first run. Rebuilding Burn with a new `Resources/pricing.json` doesn't change the file you already have; edit it or delete it to get the new one.
 
-The shipped prices were fitted from Claude Code's own cost-state records, so they match the cost in Claude Code's statusline. They are list prices. A model with no price (missing, or set to `null`) is never counted as $0: its tokens are reported as unpriced, the menu-bar total and session costs get a "+", and the popover names the models to add.
+The shipped prices for Opus 5.5, Opus 4.8, Sonnet 5 and Haiku 4.5 were fitted from Claude Code's own cost-state records, so they match the cost in Claude Code's statusline. The rest come from Anthropic's pricing page, and the fitted ones match it too. All of them are list prices. Haiku 5.5 costs more for prompts over 100,000 tokens; an `above` block in `pricing.json` gives those prices, and Burn applies them per request using input plus cache tokens. A model with no price (missing, or set to `null`) is never counted as $0: its tokens are reported as unpriced, the menu-bar total and session costs get a "+", and the popover names the models to add.
 
 All cache writes are priced at the `cacheWrite` rate. 1-hour cache writes aren't priced separately.
 
@@ -106,7 +106,6 @@ To start over, quit Burn and delete `usage.db` (and `usage.db-wal` and `usage.db
 
 ## Check against your AWS bill
 
-- Cross-region `us.` inference profiles may cost about 10% more than list price. The fitted table doesn't include that.
+- Bedrock regional and multi-region endpoints, which include `us.` inference profiles, cost 10% more than the list prices in `pricing.json`.
 - Enterprise discounts aren't modelled.
-- Sonnet 4.5 and Opus 5 ship unpriced.
-- The Sonnet 5 price was fitted from a single record.
+- Bedrock is billed by AWS at its own published rates (https://aws.amazon.com/bedrock/pricing/), which Burn hasn't been checked against.

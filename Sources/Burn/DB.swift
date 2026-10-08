@@ -42,13 +42,21 @@ final class DB {
             first_ts REAL NOT NULL,
             last_ts REAL NOT NULL
         );
-        CREATE TABLE IF NOT EXISTS prices(
+        -- A copy of pricing.json, rebuilt on every launch and edit, so its shape can change freely.
+        DROP TABLE IF EXISTS prices;
+        CREATE TABLE prices(
             model TEXT PRIMARY KEY,
             input REAL NOT NULL,
             output REAL NOT NULL,
             cache_write REAL NOT NULL,
             cache_read REAL NOT NULL,
-            note TEXT NOT NULL DEFAULT ''
+            note TEXT NOT NULL DEFAULT '',
+            -- Prompts over tier_tokens (input + cache write + cache read) pay the t_ prices.
+            tier_tokens INTEGER,
+            t_input REAL,
+            t_output REAL,
+            t_cache_write REAL,
+            t_cache_read REAL
         );
         CREATE TABLE IF NOT EXISTS files(
             path TEXT PRIMARY KEY,

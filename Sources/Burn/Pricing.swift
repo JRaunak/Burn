@@ -29,13 +29,17 @@ final class Pricing {
                 try db.run("DELETE FROM prices")
                 for (model, value) in models {
                     guard let p = value as? [String: Any] else { continue }
-                    func n(_ k: String) throws -> Double {
-                        guard let v = p[k] as? NSNumber else { throw DBError(description: "\(model) is missing \(k)") }
+                    func n(_ o: [String: Any], _ k: String) throws -> Double {
+                        guard let v = o[k] as? NSNumber else { throw DBError(description: "\(model) is missing \(k)") }
                         return v.doubleValue
                     }
-                    try db.run("INSERT INTO prices VALUES(?,?,?,?,?,?)",
-                               [normalizeModel(model), try n("input"), try n("output"),
-                                try n("cacheWrite"), try n("cacheRead"), p["source"] as? String ?? ""])
+                    let tier = p["above"] as? [String: Any]
+                    let tierArgs: [Any?] = try tier.map {
+                        [try n($0, "tokens"), try n($0, "input"), try n($0, "output"), try n($0, "cacheWrite"), try n($0, "cacheRead")]
+                    } ?? [nil, nil, nil, nil, nil]
+                    try db.run("INSERT INTO prices VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                               [normalizeModel(model), try n(p, "input"), try n(p, "output"),
+                                try n(p, "cacheWrite"), try n(p, "cacheRead"), p["source"] as? String ?? ""] + tierArgs)
                 }
             }
             error = nil

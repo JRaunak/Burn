@@ -38,8 +38,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         button.target = self
         button.action = #selector(toggle)
 
-        model.$today
-            .map { usd($0.cost) + ($0.unpricedTokens > 0 ? "+" : "") }
+        model.$today.combineLatest(model.$scanning)
+            .map { today, scanning in scanning ? "Indexing…" : usd(today.cost) + (today.unpricedTokens > 0 ? "+" : "") }
             .removeDuplicates()
             .sink { button.attributedTitle = NSAttributedString(string: " " + $0, attributes: [
                 .font: NSFont.menuBarFont(ofSize: 0), .foregroundColor: NSColor.labelColor]) }
