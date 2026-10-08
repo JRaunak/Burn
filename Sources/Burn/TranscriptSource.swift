@@ -1,0 +1,172 @@
+import CoreServices
+import Foundation
+
+final class TranscriptSource: UsageSource {
+    let id = Sources.transcripts
+    let label = "Claude Code transcripts"
+    let caveat = "Only usage Claude Code wrote to ~/.claude/projects. Background calls it doesn't log, and transcripts deleted before Burn first ran, are missing."
+    private(set) var lastError: String?
+
+    private let db: DB
+    private let root = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude/projects")
+    private let queue = DispatchQueue(label: "burn.transcripts", qos: .utility)
+    private var stream: FSEventStreamRef?
+    private var onChange: () -> Void = {}
+
+    init(db: DB) { self.db = db }
+
+    func start(onChange: @escaping () -> Void) {
+        self.onChange = onChange
+        queue.async { self.scanAll() }
+        watch()
+    }
+
+    func stop() {
+        guard let s = stream else { return }
+        FSEventStreamStop(s)
+        FSEventStreamInvalidate(s)
+        FSEventStreamRelease(s)
+        stream = nil
+    }
+
+    func rescanFromZero() {
+        queue.async {
+            self.db.queue.sync { _ = try? self.db.run("DELETE FROM files") }
+            self.scanAll()
+        }
+    }
+
+    private func watch() {
+        var ctx = FSEventStreamContext(version: 0, info: Unmanaged.passUnretained(self).toOpaque(),
+                                       retain: nil, release: nil, copyDescription: nil)
+        let cb: FSEventStreamCallback = { _, info, count, paths, _, _ in
+            let me = Unmanaged<TranscriptSource>.fromOpaque(info!).takeUnretainedValue()
+            let list = unsafeBitCast(paths, to: NSArray.self) as? [String] ?? []
+            let changed = list.prefix(count).filter { $0.hasSuffix(".jsonl") }
+            guard !changed.isEmpty else { return }
+            var any = false
+            for p in Set(changed) { any = me.ingest(URL(fileURLWithPath: p)) || any }
+            if any { me.onChange() }
+        }
+        let flags = UInt32(kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagUseCFTypes)
+        guard let s = FSEventStreamCreate(nil, cb, &ctx, [root.path] as CFArray,
+                                          FSEventStreamEventId(kFSEventStreamEventIdSinceNow), 2.0, flags) else {
+            lastError = "Couldn't watch \(root.path)"
+            return
+        }
+        FSEventStreamSetDispatchQueue(s, queue)
+        FSEventStreamStart(s)
+        stream = s
+    }
+
+    private func scanAll() {
+        guard let e = FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil) else { return }
+        var any = false
+        for case let url as URL in e where url.pathExtension == "jsonl" {
+            any = ingest(url) || any
+        }
+        // The first full scan leaves hundreds of MB of freed large blocks cached by malloc.
+        malloc_zone_pressure_relief(nil, 0)
+        if any { onChange() }
+    }
+
+    /// Reads whatever was appended since the stored offset. Returns true if rows were written.
+    @discardableResult
+    private func ingest(_ url: URL) -> Bool {
+        let path = url.path
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: path),
+              let size = (attrs[.size] as? NSNumber)?.intValue,
+              let inode = (attrs[.systemFileNumber] as? NSNumber)?.intValue else { return false }
+
+        let stored = db.queue.sync { (try? db.run("SELECT inode, offset FROM files WHERE path=?", [path]))?.first }
+        var offset = 0
+        if let s = stored, s.int(0) == inode, s.int(1) <= size { offset = s.int(1) }
+        guard offset < size, let fh = try? FileHandle(forReadingFrom: url) else { return false }
+        defer { try? fh.close() }
+
+        let isSubagentFile = path.contains("/subagents/")
+        let fallbackProject = projectName(fromDir: url)
+        var rows: [UsageRow] = []
+        var carry = Data()
+        var consumed = offset
+        do {
+            try fh.seek(toOffset: UInt64(offset))
+            while let chunk = try fh.read(upToCount: 1 << 20), !chunk.isEmpty {
+                carry.append(chunk)
+                guard let nl = carry.lastIndex(of: 0x0A) else { continue }
+                let complete = carry[carry.startIndex...nl]
+                for line in complete.split(separator: 0x0A) {
+                    if let r = parse(Data(line), subagentFile: isSubagentFile, fallbackProject: fallbackProject) {
+                        rows.append(r)
+                    }
+                }
+                consumed += complete.count
+                carry = Data(carry[carry.index(after: nl)...])
+            }
+        } catch {
+            lastError = "\(url.lastPathComponent): \(error.localizedDescription)"
+            return false
+        }
+
+        db.queue.sync {
+            do {
+                try db.transaction {
+                    for r in rows {
+                        try db.upsert(r)
+                        try db.run("""
+                        INSERT INTO sessions(id,project,first_ts,last_ts) VALUES(?,?,?,?)
+                        ON CONFLICT(id) DO UPDATE SET first_ts=MIN(first_ts,excluded.first_ts), last_ts=MAX(last_ts,excluded.last_ts)
+                        """, [r.session, r.project, r.ts, r.ts])
+                    }
+                    try db.run("""
+                    INSERT INTO files(path,inode,offset) VALUES(?,?,?)
+                    ON CONFLICT(path) DO UPDATE SET inode=excluded.inode, offset=excluded.offset
+                    """, [path, inode, consumed])
+                }
+            } catch {
+                lastError = "\(url.lastPathComponent): \(error)"
+            }
+        }
+        return !rows.isEmpty
+    }
+
+    private static let usageMarker = Data("\"usage\"".utf8)
+    private static let assistantMarker = Data("\"type\":\"assistant\"".utf8)
+
+    private func parse(_ line: Data, subagentFile: Bool, fallbackProject: String) -> UsageRow? {
+        guard line.range(of: Self.usageMarker) != nil, line.range(of: Self.assistantMarker) != nil,
+              let d = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
+              d["type"] as? String == "assistant",
+              let m = d["message"] as? [String: Any],
+              let mid = m["id"] as? String,
+              let u = m["usage"] as? [String: Any],
+              let model = m["model"] as? String, model != "<synthetic>",
+              let ts = (d["timestamp"] as? String).flatMap(parseISO) else { return nil }
+
+        func n(_ k: String) -> Int { (u[k] as? NSNumber)?.intValue ?? 0 }
+        let cwd = d["cwd"] as? String ?? ""
+        return UsageRow(
+            id: "cc:" + mid,
+            source: id,
+            session: d["sessionId"] as? String ?? d["session_id"] as? String ?? "",
+            project: cwd.isEmpty ? fallbackProject : (cwd as NSString).lastPathComponent,
+            model: normalizeModel(model),
+            ts: ts,
+            sidechain: subagentFile || (d["isSidechain"] as? Bool ?? false),
+            agent: d["attributionAgent"] as? String ?? d["agentId"] as? String ?? "",
+            input: n("input_tokens"),
+            output: n("output_tokens"),
+            cacheWrite: n("cache_creation_input_tokens"),
+            cacheRead: n("cache_read_input_tokens")
+        )
+    }
+
+    /// "-Users-me-Desktop-Burn" becomes "Burn". Lossy for names containing "-", so cwd is preferred.
+    private func projectName(fromDir url: URL) -> String {
+        var dir = url.deletingLastPathComponent()
+        while dir.deletingLastPathComponent().path != root.path, dir.path.count > root.path.count {
+            dir = dir.deletingLastPathComponent()
+        }
+        return dir.lastPathComponent.split(separator: "-").last.map(String.init) ?? dir.lastPathComponent
+    }
+}

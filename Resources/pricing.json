@@ -1,0 +1,11 @@
+{
+  "note": "USD per 1M tokens. Values with source 'claude-code' were fitted from Claude Code's own cost-state records, so they match the statusline. They are list prices and may not match your AWS bill. Set a model to null to mark it unpriced. Model keys have region prefixes, 'anthropic.', '[1m]', date and '-v1:0' suffixes stripped.",
+  "models": {
+    "claude-opus-5-5":   { "input": 4, "output": 20, "cacheWrite": 5,    "cacheRead": 0.2, "source": "claude-code, 12 records" },
+    "claude-opus-4-8":   { "input": 5, "output": 25, "cacheWrite": 6.25, "cacheRead": 0.5, "source": "claude-code, 9 records" },
+    "claude-haiku-4-5":  { "input": 1, "output": 5,  "cacheWrite": 1.25, "cacheRead": 0.1, "source": "claude-code, 2 records" },
+    "claude-sonnet-5":   { "input": 2, "output": 10, "cacheWrite": 2.5,  "cacheRead": 0.2, "source": "claude-code, 1 record, verify" },
+    "claude-sonnet-4-5": null,
+    "claude-opus-5": null
+  }
+}
