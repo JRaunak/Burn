@@ -24,7 +24,7 @@ It uses no AI tokens and makes no network requests unless you turn on the Bedroc
 curl -fsSL https://raw.githubusercontent.com/JRaunak/Burn/master/install.sh | bash
 ```
 
-`install.sh` downloads `Burn.tar.gz` from the [latest release](https://github.com/JRaunak/Burn/releases/latest), quits Burn if it's running, replaces `~/Applications/Burn.app`, and opens it. Releases are Apple Silicon only; on an Intel Mac the script stops and points you to building from source.
+`install.sh` downloads `Burn.tar.gz` from the [latest release](https://github.com/JRaunak/Burn/releases/latest), quits Burn if it's running, replaces `~/Applications/Burn.app`, and opens it. The prebuilt app is Apple Silicon only. On an Intel Mac, or on a network that blocks GitHub's release-asset host (`release-assets.githubusercontent.com`, which some company networks do), the script downloads the same release's source from `codeload.github.com` and builds it with `build.sh` instead. That needs the Command Line Tools and takes about a minute.
 
 > [!WARNING]
 > Releases are ad-hoc signed, not notarized. Files fetched with `curl` don't get the quarantine attribute, so Gatekeeper doesn't block the app. Downloading the same archive in a browser does set it, and macOS will then refuse to open it. Use the script.
@@ -205,7 +205,7 @@ To start over, quit Burn and delete `usage.db` (and `usage.db-wal` and `usage.db
 ## Troubleshooting
 
 - macOS refuses to open Burn after a browser download. The archive is quarantined. Install with the `curl` command above instead.
-- "Burn releases are Apple Silicon only." `install.sh` on an Intel Mac. Clone the repo and run `./build.sh install`.
+- "Building from source needs the Command Line Tools." The prebuilt download failed (Intel Mac, or a blocked release host) and the source fallback has no compiler. Run `xcode-select --install`, then the install command again.
 - The total stays at "Indexing…". The first full read of `~/.claude/projects` is running. It shows only when Burn has no stored file offsets: on first run, after you delete `usage.db`, and after "Re-read all transcripts".
 - A "+" after a total. Some models have no price. The popover names them; add them to `pricing.json`.
 - "pricing.json: … is missing input" (or another field). Every priced model needs all four prices, and an `above` block needs `tokens` too. Until you fix it, Burn keeps the prices from the last good load; after a relaunch every model is unpriced.
