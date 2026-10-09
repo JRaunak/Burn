@@ -7,6 +7,8 @@ import SwiftUI
 final class Banners {
     var screen: () -> NSScreen? = { nil }
     private var shown: [Banner] = []
+    /// macOS draws its own banner about 16 to 71 pt below the visible top, and Burn posts both.
+    private static let topInset: CGFloat = 76
 
     func show(_ due: [Alerts.Due]) {
         for d in due {
@@ -35,10 +37,9 @@ final class Banners {
         b.exit()
     }
 
-    /// Starts below the slot macOS uses for its own banner, since Burn posts both.
     private func layout() {
         guard let area = (screen() ?? NSScreen.screens.first)?.visibleFrame else { return }
-        var top = area.maxY - 84
+        var top = area.maxY - Self.topInset
         for b in shown {
             let f = NSRect(x: area.maxX - 12 - Banner.width, y: top - b.height, width: Banner.width, height: b.height)
             b.move(to: f)
