@@ -66,6 +66,9 @@ final class DB {
             offset INTEGER NOT NULL
         );
         CREATE TABLE IF NOT EXISTS state(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        -- When telemetry starts covering each session; transcripts are used only before that.
+        CREATE VIEW IF NOT EXISTS otel_cut AS
+            SELECT session, MIN(ts) AS t FROM messages WHERE source = 'otel' AND session != '' GROUP BY session;
         """)
         let columns = try run("PRAGMA table_info(messages)").map { $0.str(1) }
         if !columns.contains("premium") {

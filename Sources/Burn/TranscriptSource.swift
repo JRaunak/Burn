@@ -124,6 +124,10 @@ final class TranscriptSource: UsageSource {
                         ON CONFLICT(id) DO UPDATE SET first_ts=MIN(first_ts,excluded.first_ts), last_ts=MAX(last_ts,excluded.last_ts)
                         """, [r.session, r.project, r.ts, r.ts])
                     }
+                    // Telemetry can arrive before its session's transcript; name its project once it's known.
+                    for (session, project) in Dictionary(rows.map { ($0.session, $0.project) }, uniquingKeysWith: { a, _ in a }) {
+                        try db.run("UPDATE messages SET project=? WHERE source='otel' AND session=? AND project=''", [project, session])
+                    }
                     try db.run("""
                     INSERT INTO files(path,inode,offset) VALUES(?,?,?)
                     ON CONFLICT(path) DO UPDATE SET inode=excluded.inode, offset=excluded.offset

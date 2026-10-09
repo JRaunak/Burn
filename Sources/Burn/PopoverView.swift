@@ -49,7 +49,7 @@ struct PopoverView: View {
                 Label(e, systemImage: "xmark.octagon").font(.caption).foregroundStyle(.red).lineLimit(3)
             }
 
-            Text(model.activeSource.caveat).font(.caption2).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            Text(model.caveat).font(.caption2).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
 
             Divider()
             HStack {
@@ -61,6 +61,7 @@ struct PopoverView: View {
         }
         .padding(14)
         .frame(width: 320)
+        .frame(maxHeight: .infinity, alignment: .top)
     }
 }
 

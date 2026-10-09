@@ -66,7 +66,7 @@ All cache writes are priced at the `cacheWrite` rate. 1-hour cache writes aren't
 
 ## Sources
 
-Pick a source in the popover or the history window. Burn never adds sources together, because Bedrock logs already include Claude Code's own calls.
+Pick a source in the popover or the history window. The default, "All Claude Code", is the one to read as your cost. It uses the transcripts for each session until Claude Code telemetry starts reporting that session, then switches to telemetry, which also covers the calls transcripts miss. Each request is counted once. Without telemetry it equals the transcripts. "Transcripts only" and "Telemetry only" are there to drill into. Bedrock logs are never added to the others, because they already include Claude Code's own calls.
 
 ### Claude Code transcripts (default)
 

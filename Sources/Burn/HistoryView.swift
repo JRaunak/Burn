@@ -46,7 +46,7 @@ struct HistoryView: View {
                 .width(80)
             }
 
-            Text(model.activeSource.caveat + " A \"+\" means some tokens have no price.")
+            Text(model.caveat + " A \"+\" means some tokens have no price.")
                 .font(.caption).foregroundStyle(.secondary)
         }
         .padding(16)

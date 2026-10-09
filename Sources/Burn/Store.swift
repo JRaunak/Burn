@@ -3,8 +3,8 @@ import SwiftUI
 
 struct Filter: Equatable {
     enum Agent: String, CaseIterable { case all = "All", main = "Main agent", sub = "Subagents" }
-    var source = Sources.transcripts
-    var from = Calendar.current.date(byAdding: .day, value: -29, to: Calendar.current.startOfDay(for: Date()))!
+    var source = Sources.combined
+    var from = Calendar.current.date(from: Calendar.current.dateComponents([.year, .month], from: Date()))!
     /// nil means through today, so a window left open past midnight keeps including today.
     var to: Date?
     var project = ""
@@ -15,8 +15,9 @@ struct Filter: Equatable {
     /// `to` is inclusive of that whole local day.
     func sql() -> (String, [Any?]) {
         let end = Calendar.current.date(byAdding: .day, value: 1, to: Calendar.current.startOfDay(for: to ?? Date()))!
-        var w = ["m.source = ?", "m.ts >= ?", "m.ts < ?"]
-        var args: [Any?] = [source, Calendar.current.startOfDay(for: from).timeIntervalSince1970, end.timeIntervalSince1970]
+        let (src, srcArgs) = Sources.clause(source)
+        var w = [src, "m.ts >= ?", "m.ts < ?"]
+        var args: [Any?] = srcArgs + [Calendar.current.startOfDay(for: from).timeIntervalSince1970, end.timeIntervalSince1970]
         if !project.isEmpty { w.append("m.project = ?"); args.append(project) }
         if !session.isEmpty { w.append("m.session = ?"); args.append(session) }
         if !model.isEmpty { w.append("m.model = ?"); args.append(model) }
@@ -56,7 +57,7 @@ struct Summary: Equatable {
 }
 
 enum Q {
-    static let from = "FROM messages m LEFT JOIN prices p ON p.model = m.model"
+    static let from = "FROM messages m LEFT JOIN prices p ON p.model = m.model LEFT JOIN otel_cut c ON c.session = m.session"
     private static let tiered = "(p.tier_tokens IS NOT NULL AND m.input + m.cache_write + m.cache_read > p.tier_tokens)"
     static let cost = """
         (COALESCE(m.cost, CASE WHEN \(tiered)
@@ -114,7 +115,8 @@ enum Q {
     }
 
     static func distinct(_ db: DB, _ column: String, source: String) -> [String] {
-        ((try? db.run("SELECT DISTINCT \(column) FROM messages WHERE source=? AND \(column) != '' ORDER BY 1", [source])) ?? []).map { $0.str(0) }
+        let (src, args) = Sources.clause(source)
+        return ((try? db.run("SELECT DISTINCT m.\(column) \(from) WHERE \(src) AND m.\(column) != '' ORDER BY 1", args)) ?? []).map { $0.str(0) }
     }
 }
 
@@ -129,7 +131,7 @@ final class AppModel: ObservableObject {
     @Published var scanning = false
     /// Separate object so a frame tick redraws only the menu-bar label.
     let flame = FlameFrame()
-    @Published var source = UserDefaults.standard.string(forKey: "source") ?? Sources.transcripts {
+    @Published var source = UserDefaults.standard.string(forKey: "source") ?? Sources.combined {
         didSet { UserDefaults.standard.set(source, forKey: "source"); refresh() }
     }
 
@@ -146,11 +148,12 @@ final class AppModel: ObservableObject {
     private var lastUsage: Double = 0
     private var flickeredFor: Double = 0
 
-    var activeSource: UsageSource {
+    var caveat: String {
         switch source {
-        case Sources.bedrock: return bedrock
-        case Sources.otel: return otel ?? transcripts
-        default: return transcripts
+        case Sources.combined: return Sources.combinedCaveat
+        case Sources.bedrock: return bedrock.caveat
+        case Sources.otel: return otel?.caveat ?? "Telemetry is off. Turn it on in Settings."
+        default: return transcripts.caveat
         }
     }
 
@@ -181,7 +184,7 @@ final class AppModel: ObservableObject {
     }
 
     private func startOTel() {
-        let o = OTelSource(db: db, port: UInt16(Settings.otelPort))
+        let o = OTelSource(db: db, port: UInt16(Settings.otelPort), endpoints: transcripts.endpoints)
         o.start { [weak self] in self?.refresh() }
         otel = o
     }
@@ -209,8 +212,9 @@ final class AppModel: ObservableObject {
                     Q.breakdown(db, t, by: "m.model"),
                     Q.breakdown(db, t, by: "CASE WHEN m.sidechain=1 THEN 'Subagents' ELSE 'Main agent' END"))
         }
-        let latest = db.queue.sync { (try? db.run("SELECT MAX(ts) FROM messages WHERE source=?", [source]))?.first?.dbl(0) ?? 0 }
-        let scanning = source == Sources.transcripts && transcripts.scanning
+        let (src, srcArgs) = Sources.clause(source)
+        let latest = db.queue.sync { (try? db.run("SELECT MAX(m.ts) \(Q.from) WHERE \(src)", srcArgs))?.first?.dbl(0) ?? 0 }
+        let scanning = (source == Sources.transcripts || source == Sources.combined) && transcripts.scanning
         let errs = [pricing.error, transcripts.lastError, Settings.bedrockEnabled ? bedrock.lastError : nil, otel?.lastError].compactMap { $0 }
         DispatchQueue.main.async {
             // Assigning equal values still fires objectWillChange and re-renders the popover.

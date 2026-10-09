@@ -31,17 +31,28 @@ protocol UsageSource: AnyObject {
 }
 
 enum Sources {
+    /// Not a stored source: transcripts, switched to telemetry per session once telemetry reports it.
+    static let combined = "claude-code"
     static let transcripts = "transcripts"
     static let bedrock = "bedrock-logs"
     static let otel = "otel"
-    static let all = [transcripts, bedrock, otel]
+    static let all = [combined, transcripts, otel, bedrock]
 
     static func label(_ id: String) -> String {
         switch id {
+        case combined: return "All Claude Code"
         case bedrock: return "Bedrock logs"
-        case otel: return "OpenTelemetry"
-        default: return "Claude Code transcripts"
+        case otel: return "Telemetry only"
+        default: return "Transcripts only"
         }
+    }
+
+    static let combinedCaveat = "Transcripts, switching to Claude Code telemetry for each session from the moment telemetry reports it, which adds the calls transcripts miss. Without telemetry this equals the transcripts."
+
+    /// WHERE clause for a source. `c` is the otel_cut join in Q.from.
+    static func clause(_ id: String) -> (String, [Any?]) {
+        guard id == combined else { return ("m.source = ?", [id]) }
+        return ("((m.source = 'transcripts' AND (c.t IS NULL OR m.ts < c.t)) OR m.source = 'otel')", [])
     }
 }
 
@@ -97,12 +108,17 @@ final class Endpoints {
     private let lock = NSLock()
     private var bedrockIDs: [String: String] { lock.withLock { ids } }
     private let vertexRegion: String?
+    /// The provider Claude Code is configured for, for sources that don't say (telemetry).
+    let configured: Provider
 
     init() {
         let url = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude/settings.json")
         let settings = (try? Data(contentsOf: url)).flatMap { try? JSONSerialization.jsonObject(with: $0) } as? [String: Any] ?? [:]
         let env = (settings["env"] as? [String: String] ?? [:]).merging(ProcessInfo.processInfo.environment) { file, _ in file }
         vertexRegion = env["CLOUD_ML_REGION"]
+        let named = (settings["modelProvider"] as? String)?.lowercased()
+        configured = named == "bedrock" || env["CLAUDE_CODE_USE_BEDROCK"] == "1" ? .bedrock
+            : named == "vertex" || env["CLAUDE_CODE_USE_VERTEX"] == "1" ? .vertex : .anthropic
         let ids = [settings["model"] as? String] + ["ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL",
                                                    "ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_SMALL_FAST_MODEL"].map { env[$0] }
         for case let id? in ids { learn(id) }

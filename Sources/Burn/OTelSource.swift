@@ -15,9 +15,12 @@ final class OTelSource: UsageSource {
     private var listener: NWListener?
     private var onChange: () -> Void = {}
 
-    init(db: DB, port: UInt16) {
+    private let endpoints: Endpoints
+
+    init(db: DB, port: UInt16, endpoints: Endpoints) {
         self.db = db
         self.port = port
+        self.endpoints = endpoints
     }
 
     func start(onChange: @escaping () -> Void) {
@@ -135,6 +138,8 @@ final class OTelSource: UsageSource {
             agent: a["query_source"] as? String ?? "",
             input: n("input_tokens"), output: n("output_tokens"),
             cacheWrite: n("cache_creation_tokens"), cacheRead: n("cache_read_tokens"),
-            cost: d("cost_usd"), premium: Endpoints.isRegional(model))
+            // Telemetry reports the short model name, so the configured provider's rule decides.
+            cost: d("cost_usd"),
+            premium: Endpoints.isRegional(model) || endpoints.premium(provider: endpoints.configured, model: model, geo: nil))
     }
 }
