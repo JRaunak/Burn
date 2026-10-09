@@ -106,7 +106,9 @@ final class BedrockLogSource: UsageSource {
                 input: n(input, "inputTokenCount"),
                 output: n(output, "outputTokenCount"),
                 cacheWrite: n(input, "cacheWriteInputTokenCount"),
-                cacheRead: n(input, "cacheReadInputTokenCount"))
+                cacheRead: n(input, "cacheReadInputTokenCount"),
+                // modelId can be an inference-profile ARN; the profile name is its last path part.
+                premium: Endpoints.isRegional(model.split(separator: "/").last.map(String.init) ?? model))
         }
     }
 

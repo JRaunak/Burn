@@ -69,7 +69,9 @@ struct HistoryView: View {
             }
             .frame(width: 230)
             DatePicker("From", selection: $h.filter.from, in: ...(h.filter.to ?? Date()), displayedComponents: .date)
+                .fixedSize()
             DatePicker("To", selection: toDate, in: h.filter.from...Date(), displayedComponents: .date)
+                .fixedSize()
             Picker("Project", selection: $h.filter.project) {
                 Text("All").tag("")
                 ForEach(h.projects, id: \.self) { Text($0).tag($0) }

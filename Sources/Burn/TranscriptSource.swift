@@ -9,6 +9,7 @@ final class TranscriptSource: UsageSource {
     private(set) var scanning = false
 
     private let db: DB
+    let endpoints = Endpoints()
     private let root = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude/projects")
     private let queue = DispatchQueue(label: "burn.transcripts", qos: .utility)
     private var stream: FSEventStreamRef?
@@ -136,9 +137,17 @@ final class TranscriptSource: UsageSource {
     }
 
     private static let usageMarker = Data("\"usage\"".utf8)
+    private static let costStateMarker = Data("\"type\":\"cost-state\"".utf8)
     private static let assistantMarker = Data("\"type\":\"assistant\"".utf8)
 
     private func parse(_ line: Data, subagentFile: Bool, fallbackProject: String) -> UsageRow? {
+        // cost-state is the one place transcripts name the full Bedrock profile, e.g. us.anthropic.claude-opus-5-5[1m].
+        if line.range(of: Self.costStateMarker) != nil,
+           let d = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
+           let usage = d["modelUsage"] as? [String: Any] {
+            usage.keys.forEach(endpoints.learn)
+            return nil
+        }
         guard line.range(of: Self.usageMarker) != nil, line.range(of: Self.assistantMarker) != nil,
               let d = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
               d["type"] as? String == "assistant",
@@ -162,7 +171,8 @@ final class TranscriptSource: UsageSource {
             input: n("input_tokens"),
             output: n("output_tokens"),
             cacheWrite: n("cache_creation_input_tokens"),
-            cacheRead: n("cache_read_input_tokens")
+            cacheRead: n("cache_read_input_tokens"),
+            premium: endpoints.premium(provider: Endpoints.provider(messageID: mid), model: model, geo: u["inference_geo"] as? String)
         )
     }
 

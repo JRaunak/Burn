@@ -57,7 +57,7 @@ final class DB {
             t_output REAL,
             t_cache_write REAL,
             t_cache_read REAL,
-            -- pricing.json's top-level multiplier, e.g. 1.1 for Bedrock regional endpoints.
+            -- pricing.json's regionalPremium, applied to messages flagged premium.
             mult REAL NOT NULL DEFAULT 1
         );
         CREATE TABLE IF NOT EXISTS files(
@@ -67,6 +67,11 @@ final class DB {
         );
         CREATE TABLE IF NOT EXISTS state(key TEXT PRIMARY KEY, value TEXT NOT NULL);
         """)
+        let columns = try run("PRAGMA table_info(messages)").map { $0.str(1) }
+        if !columns.contains("premium") {
+            // Re-reading every transcript fills the new column through the upsert.
+            try exec("ALTER TABLE messages ADD COLUMN premium INTEGER NOT NULL DEFAULT 0; DELETE FROM files;")
+        }
     }
 
     func exec(_ sql: String) throws {

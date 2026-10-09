@@ -18,16 +18,18 @@ enum BurnMain {
 
 /// Owns the status item in AppKit. MenuBarExtra re-rendered its whole SwiftUI label on every
 /// flicker frame (about 9% CPU); setting `button.image` directly is just an image swap.
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private let model = AppModel()
     private let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let popover = NSPopover()
     private var subs: Set<AnyCancellable> = []
+    private var outsideClicks: Any?
 
     func applicationDidFinishLaunching(_ note: Notification) {
         Windows.shared.model = model
         LoginItem.registerOnFirstLaunch()
         popover.behavior = .transient
+        popover.delegate = self
         popover.contentViewController = NSHostingController(rootView: PopoverView(close: { [weak self] in
             self?.popover.performClose(nil)
         }).environmentObject(model))
@@ -59,20 +61,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             model.refresh()
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             popover.contentViewController?.view.window?.makeKey()
+            // .transient only sees clicks inside this app; an accessory app is rarely the active one,
+            // so clicks in other apps and on the desktop are caught here instead.
+            outsideClicks = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
+                self?.popover.performClose(nil)
+            }
         }
+    }
+
+    func popoverDidClose(_ notification: Notification) {
+        if let m = outsideClicks { NSEvent.removeMonitor(m) }
+        outsideClicks = nil
     }
 }
 
 /// History and Settings are plain NSWindows, because SwiftUI's openWindow needs a scene and the
 /// status item lives outside one.
-final class Windows {
+final class Windows: NSObject, NSWindowDelegate {
     static let shared = Windows()
     var model: AppModel!
     private var open: [String: NSWindow] = [:]
 
     func show(_ id: String) {
         NSApp.activate(ignoringOtherApps: true)
+        // The screen the user clicked the menu-bar item on; the mouse is still there.
+        let screen = NSScreen.screens.first { NSMouseInRect(NSEvent.mouseLocation, $0.frame, false) } ?? NSScreen.main
         if let w = open[id] {
+            if w.screen != screen { place(w, on: screen) }
             w.makeKeyAndOrderFront(nil)
             return
         }
@@ -82,9 +97,26 @@ final class Windows {
         let w = NSWindow(contentViewController: NSHostingController(rootView: view))
         w.title = title
         w.isReleasedWhenClosed = false
-        w.center()
+        // Follow the user to the current Space instead of switching back to the window's old one.
+        w.collectionBehavior.insert(.moveToActiveSpace)
+        w.delegate = self
+        place(w, on: screen)
         w.makeKeyAndOrderFront(nil)
+        // Otherwise the first date field takes focus and shows its accent-coloured selection.
+        w.makeFirstResponder(nil)
         open[id] = w
+    }
+
+    private func place(_ w: NSWindow, on screen: NSScreen?) {
+        guard let area = screen?.visibleFrame else { return w.center() }
+        let size = w.frame.size
+        w.setFrameOrigin(NSPoint(x: area.midX - size.width / 2, y: area.midY - size.height / 2))
+    }
+
+    /// Closing discards the window, so filters and other view state start fresh next time.
+    func windowWillClose(_ note: Notification) {
+        guard let w = note.object as? NSWindow else { return }
+        open = open.filter { $0.value !== w }
     }
 }
 

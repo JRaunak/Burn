@@ -25,7 +25,7 @@ final class Pricing {
                   let models = root["models"] as? [String: Any] else {
                 throw DBError(description: "pricing.json needs a \"models\" object")
             }
-            let mult = (root["multiplier"] as? NSNumber)?.doubleValue ?? 1
+            let mult = (root["regionalPremium"] as? NSNumber)?.doubleValue ?? 1
             try db.transaction {
                 try db.run("DELETE FROM prices")
                 for (model, value) in models {

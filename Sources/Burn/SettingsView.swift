@@ -23,6 +23,8 @@ struct SettingsView: View {
 
             Section("Pricing") {
                 Text(model.pricing.url.path).font(.caption).textSelection(.enabled)
+                Text("Regional premium applies to messages from regional or US-only endpoints. \(model.transcripts.endpoints.summary).")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 HStack {
                     Button("Open pricing.json") { NSWorkspace.shared.open(model.pricing.url) }
                     Button("Re-read all transcripts") { model.transcripts.rescanFromZero() }
@@ -56,7 +58,8 @@ struct SettingsView: View {
             if !status.text.isEmpty { Text(status.text).font(.caption) }
         }
         .formStyle(.grouped)
-        .frame(width: 520)
+        // A grouped Form scrolls, so it has no height of its own; without this the window opens empty.
+        .frame(width: 540, height: 680)
         .padding()
     }
 

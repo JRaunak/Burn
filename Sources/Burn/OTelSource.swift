@@ -135,6 +135,6 @@ final class OTelSource: UsageSource {
             agent: a["query_source"] as? String ?? "",
             input: n("input_tokens"), output: n("output_tokens"),
             cacheWrite: n("cache_creation_tokens"), cacheRead: n("cache_read_tokens"),
-            cost: d("cost_usd"))
+            cost: d("cost_usd"), premium: Endpoints.isRegional(model))
     }
 }
