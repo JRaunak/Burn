@@ -174,14 +174,6 @@ final class DB {
         try exec("BEGIN IMMEDIATE")
         do { try body(); try exec("COMMIT") } catch { try? exec("ROLLBACK"); throw error }
     }
-
-    func state(_ key: String) -> String? {
-        (try? run("SELECT value FROM state WHERE key=?", [key]))?.first?.first as? String
-    }
-
-    func setState(_ key: String, _ value: String) {
-        _ = try? run("INSERT INTO state(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [key, value])
-    }
 }
 
 extension Array where Element == Any? {

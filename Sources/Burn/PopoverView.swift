@@ -19,12 +19,6 @@ struct PopoverView: View {
                 }
             }
 
-            Picker("Source", selection: $model.source) {
-                ForEach(Sources.all, id: \.self) { Text(Sources.label($0)).tag($0) }
-            }
-            .pickerStyle(.menu)
-            .labelsHidden()
-
             if model.scanning {
                 Text("Reading your Claude Code transcripts for the first time. Totals fill in as it goes.")
                     .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
@@ -49,7 +43,7 @@ struct PopoverView: View {
                 Label(e, systemImage: "xmark.octagon").font(.caption).foregroundStyle(.red).lineLimit(3)
             }
 
-            Text(model.caveat).font(.caption2).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            Text(Sources.caveat).font(.caption2).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
 
             Divider()
             HStack {

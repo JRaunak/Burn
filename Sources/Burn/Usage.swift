@@ -33,9 +33,6 @@ final class Locked<T> {
 
 protocol UsageSource: AnyObject {
     var id: String { get }
-    var label: String { get }
-    /// Shown next to every number from this source.
-    var caveat: String { get }
     var lastError: String? { get }
     /// `onChange` is called off the main thread after new rows land.
     func start(onChange: @escaping () -> Void)
@@ -43,29 +40,13 @@ protocol UsageSource: AnyObject {
 }
 
 enum Sources {
-    /// Not a stored source: every transcript row plus the telemetry rows transcripts don't hold.
-    static let combined = "claude-code"
     static let transcripts = "transcripts"
-    static let bedrock = "bedrock-logs"
     static let otel = "otel"
-    static let all = [combined, transcripts, otel, bedrock]
 
-    static func label(_ id: String) -> String {
-        switch id {
-        case combined: return "All Claude Code"
-        case bedrock: return "Bedrock logs"
-        case otel: return "Telemetry only"
-        default: return "Transcripts only"
-        }
-    }
+    static let caveat = "Every transcript request, plus the telemetry requests no transcript holds, which are the calls Claude Code doesn't write to transcripts."
 
-    static let combinedCaveat = "Every transcript request, plus the telemetry requests no transcript holds, which are the calls Claude Code doesn't write to transcripts."
-
-    /// WHERE clause for a source. `dup` is kept by triggers in DB.
-    static func clause(_ id: String) -> (String, [Any?]) {
-        guard id == combined else { return ("m.source = ?", [id]) }
-        return ("(m.source = 'transcripts' OR (m.source = 'otel' AND m.dup = 0))", [])
-    }
+    /// Every transcript row plus the telemetry rows transcripts don't hold. `dup` is kept by triggers in DB.
+    static let clause = "(m.source = 'transcripts' OR (m.source = 'otel' AND m.dup = 0))"
 }
 
 extension DB {

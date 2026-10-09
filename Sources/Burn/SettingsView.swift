@@ -2,14 +2,6 @@ import SwiftUI
 
 struct SettingsView: View {
     @EnvironmentObject var model: AppModel
-    @AppStorage("bedrock.enabled") private var bedrockOn = false
-    @AppStorage("bedrock.profile") private var profile = Settings.bedrockConfig().profile
-    @AppStorage("bedrock.region") private var region = Settings.bedrockConfig().region
-    @AppStorage("bedrock.logGroup") private var logGroup = "/aws/bedrock/modelinvocations"
-    @AppStorage("bedrock.identity") private var identity = ""
-    @AppStorage("bedrock.lookbackDays") private var lookback = 7
-    @AppStorage("otel.enabled") private var otelOn = false
-    @AppStorage("otel.port") private var otelPort = 4318
     @StateObject private var status = Note()
 
     var body: some View {
@@ -33,29 +25,24 @@ struct SettingsView: View {
                 }
             }
 
-            Section("Bedrock invocation logs (uses the network)") {
-                Toggle("Enabled", isOn: Binding(get: { bedrockOn }, set: { model.setBedrock($0) }))
-                TextField("AWS profile", text: $profile)
-                TextField("Region", text: $region)
-                TextField("Log group", text: $logGroup)
+            Section("Claude Code telemetry") {
                 HStack {
-                    TextField("Identity contains", text: $identity)
-                    Button("Detect") { detect() }
+                    Text(model.telemetry.line).fixedSize(horizontal: false, vertical: true)
+                    Spacer()
+                    switch model.telemetry.action {
+                    case .setUp?: Button("Set up telemetry") { model.changeTelemetry(.setUp) }
+                    case .remove?: Button("Remove") { model.changeTelemetry(.remove) }
+                    case nil: EmptyView()
+                    }
                 }
-                Stepper("First sync looks back \(lookback) days", value: $lookback, in: 1...90)
-                HStack {
-                    Button("Sync now") { model.bedrock.syncNow() }.disabled(!bedrockOn)
-                    if let d = model.bedrock.lastSync { Text("Last sync \(d.formatted(date: .omitted, time: .shortened))").font(.caption) }
+                if let e = model.telemetryError ?? model.otel?.lastError {
+                    Text(e).font(.caption).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
                 }
-                Text("Runs `aws logs filter-log-events` every 15 minutes, filtered to your identity. Only token counts are kept.")
-                    .font(.caption).foregroundStyle(.secondary)
+                Text("Telemetry adds the calls Claude Code doesn't write to transcripts. Burn receives its logs on 127.0.0.1:\(Telemetry.port) and nothing leaves this Mac.")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
-
-            Section("Claude Code telemetry (localhost only)") {
-                Toggle("Listen on 127.0.0.1:\(otelPort)", isOn: Binding(get: { otelOn }, set: { model.setOTel($0) }))
-                Text("Add to the \"env\" object in ~/.claude/settings.json yourself:\n\"CLAUDE_CODE_ENABLE_TELEMETRY\": \"1\",\n\"OTEL_LOGS_EXPORTER\": \"otlp\",\n\"OTEL_EXPORTER_OTLP_PROTOCOL\": \"http/json\",\n\"OTEL_EXPORTER_OTLP_ENDPOINT\": \"http://127.0.0.1:\(otelPort)\"")
-                    .font(.caption.monospaced()).textSelection(.enabled)
-            }
+            .onAppear(perform: model.checkTelemetry)
+            .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in model.checkTelemetry() }
 
             if !status.text.isEmpty { Text(status.text).font(.caption) }
         }
@@ -63,22 +50,6 @@ struct SettingsView: View {
         // A grouped Form scrolls, so it has no height of its own; without this the window opens empty.
         .frame(width: 540, height: 680)
         .padding()
-    }
-
-    private func detect() {
-        let p = profile, r = region
-        DispatchQueue.global().async {
-            let result = BedrockLogSource.callerIdentity(profile: p, region: r)
-            DispatchQueue.main.async {
-                switch result {
-                case .success(let arn):
-                    identity = arn.split(separator: "/").last.map(String.init) ?? arn
-                    status.text = "Using \(identity)"
-                case .failure(let e):
-                    status.text = "\(e)"
-                }
-            }
-        }
     }
 }
 
@@ -118,7 +89,7 @@ struct AlertsSection: View {
             }
             Toggle("Hide banner when sharing the screen", isOn: $hideWhenSharing)
             if !notifier.error.isEmpty { Text(notifier.error).font(.caption).foregroundStyle(.red) }
-            Text("Watches the selected source. Each alert fires once per period; changing the amount re-arms it.")
+            Text("Each alert fires once per period; changing the amount re-arms it.")
                 .font(.caption).foregroundStyle(.secondary)
         }
         .onAppear(perform: notifier.refreshStatus)

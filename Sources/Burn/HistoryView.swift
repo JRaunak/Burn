@@ -45,19 +45,13 @@ struct HistoryView: View {
                 sessions
             }
 
-            Text(model.caveat + " A \"+\" means some tokens have no price.")
+            Text(Sources.caveat + " A \"+\" means some tokens have no price.")
                 .font(.caption).foregroundStyle(.secondary)
         }
         .padding(16)
         .frame(minWidth: 860, minHeight: 600)
         .onAppear(perform: load)
         .onChange(of: h.filter) { load() }
-        // Project, model and session lists differ per source, so stale picks would show nothing.
-        .onChange(of: h.filter.source) {
-            h.filter.project = ""
-            h.filter.model = ""
-            h.filter.session = ""
-        }
         .onChange(of: h.filter.agent) { h.columns[visibility: "subagent"] = h.filter.agent == .all ? .automatic : .hidden }
         .onChange(of: model.today.cost) { load() }
     }
@@ -103,10 +97,6 @@ struct HistoryView: View {
 
     private var filters: some View {
         HStack {
-            Picker("Source", selection: $h.filter.source) {
-                ForEach(Sources.all, id: \.self) { Text(Sources.label($0)).tag($0) }
-            }
-            .frame(width: 230)
             DatePicker("From", selection: $h.filter.from, in: ...(h.filter.to ?? Date()), displayedComponents: .date)
                 .fixedSize()
             DatePicker("To", selection: toDate, in: h.filter.from...Date(), displayedComponents: .date)
@@ -279,7 +269,7 @@ final class HistoryModel: ObservableObject {
         DispatchQueue.global(qos: .userInitiated).async {
             let r = db.queue.sync {
                 (Q.summary(db, f), Q.daily(db, f), Q.unpricedDays(db, f), Q.sessions(db, f), Q.sessionCount(db, f),
-                 Q.distinct(db, "project", source: f.source), Q.distinct(db, "model", source: f.source))
+                 Q.distinct(db, "project"), Q.distinct(db, "model"))
             }
             let chart = DailyData(r.1, unpriced: r.2, f)
             DispatchQueue.main.async {

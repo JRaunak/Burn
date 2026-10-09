@@ -3,7 +3,6 @@ import SwiftUI
 
 struct Filter: Equatable {
     enum Agent: String, CaseIterable { case all = "All", main = "Main agent", sub = "Subagents" }
-    var source = Sources.combined
     var from = Calendar.current.date(from: Calendar.current.dateComponents([.year, .month], from: Date()))!
     /// nil means through today, so a window left open past midnight keeps including today.
     var to: Date?
@@ -15,9 +14,8 @@ struct Filter: Equatable {
     /// `to` is inclusive of that whole local day.
     func sql() -> (String, [Any?]) {
         let end = Calendar.current.date(byAdding: .day, value: 1, to: Calendar.current.startOfDay(for: to ?? Date()))!
-        let (src, srcArgs) = Sources.clause(source)
-        var w = [src, "m.ts >= ?", "m.ts < ?"]
-        var args: [Any?] = srcArgs + [Calendar.current.startOfDay(for: from).timeIntervalSince1970, end.timeIntervalSince1970]
+        var w = [Sources.clause, "m.ts >= ?", "m.ts < ?"]
+        var args: [Any?] = [Calendar.current.startOfDay(for: from).timeIntervalSince1970, end.timeIntervalSince1970]
         if !project.isEmpty { w.append("m.project = ?"); args.append(project) }
         if !session.isEmpty { w.append("m.session = ?"); args.append(session) }
         if !model.isEmpty { w.append("m.model = ?"); args.append(model) }
@@ -141,9 +139,8 @@ enum Q {
         }
     }
 
-    static func distinct(_ db: DB, _ column: String, source: String) -> [String] {
-        let (src, args) = Sources.clause(source)
-        return ((try? db.run("SELECT DISTINCT m.\(column) \(from) WHERE \(src) AND m.\(column) != '' ORDER BY 1", args)) ?? []).map { $0.str(0) }
+    static func distinct(_ db: DB, _ column: String) -> [String] {
+        ((try? db.run("SELECT DISTINCT m.\(column) \(from) WHERE \(Sources.clause) AND m.\(column) != '' ORDER BY 1")) ?? []).map { $0.str(0) }
     }
 }
 
@@ -160,14 +157,12 @@ final class AppModel: ObservableObject {
     let flame = FlameFrame()
     let notifier = Notifier()
     let banners = Banners()
-    @Published var source = UserDefaults.standard.string(forKey: "source") ?? Sources.combined {
-        didSet { UserDefaults.standard.set(source, forKey: "source"); refresh() }
-    }
+    @Published private(set) var telemetry = Telemetry.Status(line: "")
+    @Published var telemetryError: String?
 
     let db: DB
     let pricing: Pricing
     let transcripts: TranscriptSource
-    let bedrock: BedrockLogSource
     private(set) var otel: OTelSource?
     private var timer: Timer?
     private let refreshQueue = DispatchQueue(label: "burn.refresh", qos: .utility)
@@ -179,27 +174,16 @@ final class AppModel: ObservableObject {
     /// Main thread. Errors from outside the sources, kept across refreshes.
     private var reported: [String] = []
 
-    var caveat: String {
-        switch source {
-        case Sources.combined: return Sources.combinedCaveat
-        case Sources.bedrock: return bedrock.caveat
-        case Sources.otel: return otel?.caveat ?? "Telemetry is off. Turn it on in Settings."
-        default: return transcripts.caveat
-        }
-    }
-
     init() {
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Burn")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         do { db = try DB(url: dir.appendingPathComponent("usage.db")) } catch { fatalError("\(error)") }
         pricing = Pricing(dir: dir)
         transcripts = TranscriptSource(db: db)
-        bedrock = BedrockLogSource(db: db) { Settings.bedrockConfig() }
         notifier.report = { [weak self] in self?.report($0) }
 
         transcripts.start { [weak self] in self?.refresh() }
-        if Settings.bedrockEnabled { bedrock.start { [weak self] in self?.refresh() } }
-        if Settings.otelEnabled { startOTel() }
+        checkTelemetry()
         // Cheap SQL; also rolls "today" over at local midnight.
         timer = Self.common(Timer(timeInterval: 300, repeats: true) { [weak self] _ in self?.refresh() })
         refresh()
@@ -212,20 +196,47 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func setBedrock(_ on: Bool) {
-        Settings.bedrockEnabled = on
-        on ? bedrock.start { [weak self] in self?.refresh() } : bedrock.stop()
+    /// The listener runs exactly while settings.json points Claude Code's logs at it.
+    func checkTelemetry() {
+        let s: Telemetry.Status
+        do {
+            s = Telemetry.status(env: try Telemetry.read()?["env"] as? [String: Any] ?? [:], managed: Telemetry.managedEnv())
+        } catch {
+            s = Telemetry.Status(line: error.localizedDescription)
+        }
+        if telemetry != s { telemetry = s }
+        if s.listening, otel == nil {
+            let o = OTelSource(db: db, endpoints: transcripts.endpoints)
+            o.start { [weak self] in self?.refresh() }
+            otel = o
+        } else if !s.listening, let o = otel {
+            o.stop()
+            otel = nil
+            refresh()
+        }
     }
 
-    func setOTel(_ on: Bool) {
-        Settings.otelEnabled = on
-        if on { startOTel() } else { otel?.stop(); otel = nil }
+    func changeTelemetry(_ action: Telemetry.Action) {
+        do {
+            let root = try Telemetry.read()
+            let plan = Telemetry.plan(action, root: root, record: Settings.telemetryRecord)
+            guard !plan.changes.isEmpty, confirm(plan.changes) else { return }
+            try Telemetry.write(plan.root)
+            Settings.telemetryRecord = plan.record
+            telemetryError = nil
+        } catch {
+            telemetryError = "Couldn't change ~/.claude/settings.json: \(error.localizedDescription)"
+        }
+        checkTelemetry()
     }
 
-    private func startOTel() {
-        let o = OTelSource(db: db, port: UInt16(Settings.otelPort), endpoints: transcripts.endpoints)
-        o.start { [weak self] in self?.refresh() }
-        otel = o
+    private func confirm(_ changes: [String]) -> Bool {
+        let a = NSAlert()
+        a.messageText = "Change ~/.claude/settings.json?"
+        a.informativeText = changes.joined(separator: "\n") + "\n\nBurn backs the file up first, then rewrites it with its keys sorted, so other settings may move but keep their values. This applies to Claude Code sessions started after this."
+        a.addButton(withTitle: "Change")
+        a.addButton(withTitle: "Cancel")
+        return a.runModal() == .alertFirstButtonReturn
     }
 
     /// Coalesces bursts of FSEvents into one query pass.
@@ -239,11 +250,9 @@ final class AppModel: ObservableObject {
 
     private func compute() {
         pending = false
-        // `source` belongs to the main thread; its didSet writes the default before calling refresh.
-        let source = UserDefaults.standard.string(forKey: "source") ?? Sources.combined
         let now = Date()
         let amounts = Settings.alertAmounts
-        var t = Filter(source: source)
+        var t = Filter()
         t.from = Period.day.start(now)
         var m = t
         m.from = Period.month.start(now)
@@ -257,12 +266,11 @@ final class AppModel: ObservableObject {
                     Q.breakdown(db, t, by: "CASE WHEN m.sidechain=1 THEN 'Subagents' ELSE 'Main agent' END"), pricing.error,
                     amounts[.week] == nil ? nil : Q.summary(db, w))
         }
-        let stored = source == Sources.combined ? [Sources.transcripts, Sources.otel] : [source]
         let latest = db.queue.sync {
-            stored.map { (try? db.run("SELECT MAX(ts) FROM messages WHERE source = ?", [$0]))?.first?.dbl(0) ?? 0 }.max() ?? 0
+            [Sources.transcripts, Sources.otel].map { (try? db.run("SELECT MAX(ts) FROM messages WHERE source = ?", [$0]))?.first?.dbl(0) ?? 0 }.max() ?? 0
         }
-        let scanning = (source == Sources.transcripts || source == Sources.combined) && transcripts.scanning
-        let earlier = [result.5, transcripts.lastError, Settings.bedrockEnabled ? bedrock.lastError : nil]
+        let scanning = transcripts.scanning
+        let earlier = [result.5, transcripts.lastError]
         DispatchQueue.main.async {
             let errs = (earlier + [self.otel?.lastError]).compactMap { $0 } + self.reported
             // Assigning equal values still fires objectWillChange and re-renders the popover.
@@ -278,7 +286,7 @@ final class AppModel: ObservableObject {
             var spent: [Period: Summary] = [.day: result.0, .month: result.1]
             spent[.week] = result.6
             let old = Settings.alertsFired
-            let (due, fired) = Alerts.check(now: now, cal: .current, source: source, amounts: amounts, spent: spent, fired: old)
+            let (due, fired) = Alerts.check(now: now, cal: .current, amounts: amounts, spent: spent, fired: old)
             if fired != old { Settings.alertsFired = fired }
             due.forEach(self.notifier.send)
             self.present(due)
@@ -286,7 +294,7 @@ final class AppModel: ObservableObject {
     }
 
     func testAlert() {
-        let due = Alerts.Due.sample(source: source)
+        let due = Alerts.Due.sample
         notifier.test(due)
         present([due])
     }
@@ -350,15 +358,11 @@ final class FlameFrame: ObservableObject {
 enum Settings {
     private static let d = UserDefaults.standard
 
-    static var bedrockEnabled: Bool {
-        get { d.bool(forKey: "bedrock.enabled") }
-        set { d.set(newValue, forKey: "bedrock.enabled") }
+    /// What Burn's telemetry setup changed in settings.json, so Remove undoes only that.
+    static var telemetryRecord: [String: String] {
+        get { d.dictionary(forKey: "telemetry.added") as? [String: String] ?? [:] }
+        set { newValue.isEmpty ? d.removeObject(forKey: "telemetry.added") : d.set(newValue, forKey: "telemetry.added") }
     }
-    static var otelEnabled: Bool {
-        get { d.bool(forKey: "otel.enabled") }
-        set { d.set(newValue, forKey: "otel.enabled") }
-    }
-    static var otelPort: Int { d.object(forKey: "otel.port") as? Int ?? 4318 }
 
     /// "alert.day" and so on; a missing key means that alert is off.
     static var alertAmounts: [Period: Double] {
@@ -376,20 +380,5 @@ enum Settings {
     static var alertsFired: [String] {
         get { d.stringArray(forKey: "alerts.fired") ?? [] }
         set { d.set(newValue, forKey: "alerts.fired") }
-    }
-
-    /// Defaults come from the bedrock block in ~/.claude/settings.json, read only.
-    static func bedrockConfig() -> BedrockLogSource.Config {
-        let claude = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude/settings.json")
-        let b = ((try? Data(contentsOf: claude)).flatMap { try? JSONSerialization.jsonObject(with: $0) } as? [String: Any])?["bedrock"] as? [String: Any]
-        func pick(_ values: Any?..., or fallback: String) -> String {
-            values.lazy.compactMap { ($0 as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) }.first { !$0.isEmpty } ?? fallback
-        }
-        return .init(
-            profile: pick(d.string(forKey: "bedrock.profile"), b?["profile"], or: "default"),
-            region: pick(d.string(forKey: "bedrock.region"), b?["region"], or: "us-east-1"),
-            logGroup: pick(d.string(forKey: "bedrock.logGroup"), or: "/aws/bedrock/modelinvocations"),
-            identity: pick(d.string(forKey: "bedrock.identity"), or: ""),
-            lookbackDays: d.object(forKey: "bedrock.lookbackDays") as? Int ?? 7)
     }
 }

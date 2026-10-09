@@ -5,33 +5,34 @@ import Network
 /// Claude Code has no file exporter, so this is the only way to get its per-request cost_usd.
 final class OTelSource: UsageSource {
     let id = Sources.otel
-    let label = "Claude Code telemetry"
-    let caveat = "Cost as Claude Code reports it per request, including calls it doesn't write to transcripts. Only covers time since telemetry was turned on."
     @Locked private(set) var lastError: String?
 
     private let db: DB
-    private let port: UInt16
     private let queue = DispatchQueue(label: "burn.otel", qos: .utility)
     private var listener: NWListener?
     private var onChange: () -> Void = {}
 
     private let endpoints: Endpoints
 
-    init(db: DB, port: UInt16, endpoints: Endpoints) {
+    init(db: DB, endpoints: Endpoints) {
         self.db = db
-        self.port = port
         self.endpoints = endpoints
     }
 
     func start(onChange: @escaping () -> Void) {
         self.onChange = onChange
         let params = NWParameters.tcp
-        params.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: port)!)
+        params.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: Telemetry.port)!)
         do {
             let l = try NWListener(using: params)
             l.newConnectionHandler = { [weak self] c in self?.serve(c) }
             l.stateUpdateHandler = { [weak self] s in
-                if case .failed(let e) = s { self?.lastError = "Port \(self?.port ?? 0): \(e)" }
+                switch s {
+                case .failed(let e), .waiting(let e):
+                    self?.lastError = "Can't listen on 127.0.0.1:\(Telemetry.port): \(e)"
+                    onChange()
+                default: break
+                }
             }
             l.start(queue: queue)
             listener = l

@@ -40,6 +40,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private let popover = NSPopover()
     private var subs: Set<AnyCancellable> = []
     private var monitors: [Any] = []
+    /// The display whose menu bar the user last clicked Burn on.
+    private var clickedScreen: NSScreen?
     /// An off-screen copy of the popover content at its natural height, used only for measuring.
     private var sizer: NSHostingView<AnyView>!
     /// The popover hangs off this instead of the status button. A popover re-anchors whenever it
@@ -57,7 +59,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     func applicationDidFinishLaunching(_ note: Notification) {
         Windows.shared.model = model
-        model.banners.screen = { [weak self] in self?.item.button?.window?.screen }
+        model.banners.screen = { [weak self] in
+            self?.clickedScreen.flatMap { NSScreen.screens.contains($0) ? $0 : nil } ?? self?.item.button?.window?.screen
+        }
         if let e = LoginItem.registerOnFirstLaunch() { model.report(e) }
         // .transient treated a click on the status button as an outside click, so the button
         // reopened what it had just closed. Every close is triggered by hand instead.
@@ -101,8 +105,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             popover.performClose(nil)
         } else {
             model.refresh()
-            guard let buttonWindow = button.window else { return }
-            anchor.setFrame(buttonWindow.convertToScreen(button.convert(button.bounds, to: nil)), display: false)
+            guard let buttonWindow = button.window, let home = buttonWindow.screen else { return }
+            // Every display draws a replica of the item, but the button's window is on one of them,
+            // so move its rect to the display that was clicked, the same distance from the right edge.
+            let screen = screenUnderMouse() ?? home
+            clickedScreen = screen
+            var rect = buttonWindow.convertToScreen(button.convert(button.bounds, to: nil))
+            let bar = max(NSStatusBar.system.thickness, screen.safeAreaInsets.top)
+            rect.origin.x = screen.frame.maxX - (home.frame.maxX - rect.minX)
+            rect.origin.y = screen.frame.maxY - bar
+            rect.size.height = bar
+            anchor.setFrame(rect, display: false)
             anchor.orderFront(nil)
             popover.contentSize = sizer.fittingSize
             popover.show(relativeTo: anchor.contentView!.bounds, of: anchor.contentView!, preferredEdge: .minY)
@@ -121,7 +134,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             // popover and status-button clicks arrive here too. The button's action handles those.
             NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
                 guard let self else { return }
-                let ours = [self.popover.contentViewController?.view.window?.frame,
+                let ours = [self.popover.contentViewController?.view.window?.frame, self.anchor.frame,
                             self.item.button.flatMap { b in b.window?.convertToScreen(b.convert(b.bounds, to: nil)) }]
                 if !ours.contains(where: { $0?.contains(NSEvent.mouseLocation) == true }) { close() }
             },
@@ -170,7 +183,7 @@ final class Windows: NSObject, NSWindowDelegate {
     func show(_ id: String) {
         NSApp.activate()
         // The screen the user clicked the menu-bar item on; the mouse is still there.
-        let screen = NSScreen.screens.first { NSMouseInRect(NSEvent.mouseLocation, $0.frame, false) } ?? NSScreen.main
+        let screen = screenUnderMouse() ?? NSScreen.main
         if let w = open[id] {
             if w.screen != screen { place(w, on: screen) }
             w.makeKeyAndOrderFront(nil)
@@ -179,7 +192,6 @@ final class Windows: NSObject, NSWindowDelegate {
         let title: String, view: AnyView
         if id == "history" {
             let h = HistoryModel()
-            h.filter.source = model.source
             history = h
             (title, view) = ("Burn History", AnyView(HistoryView(h: h).environmentObject(model)))
         } else {
@@ -238,6 +250,10 @@ enum LoginItem {
         UserDefaults.standard.set(true, forKey: "loginItem.asked")
         return set(true)
     }
+}
+
+func screenUnderMouse() -> NSScreen? {
+    NSScreen.screens.first { NSMouseInRect(NSEvent.mouseLocation, $0.frame, false) }
 }
 
 func usd(_ v: Double) -> String {

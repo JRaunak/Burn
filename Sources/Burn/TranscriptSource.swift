@@ -3,8 +3,6 @@ import Foundation
 
 final class TranscriptSource: UsageSource {
     let id = Sources.transcripts
-    let label = "Claude Code transcripts"
-    let caveat = "Only usage Claude Code wrote to ~/.claude/projects. Background calls it doesn't log, and transcripts deleted before Burn first ran, are missing."
     @Locked private(set) var lastError: String?
     @Locked private(set) var scanning = false
 

@@ -10,13 +10,13 @@
 [![Swift](https://img.shields.io/badge/Swift-SwiftUI-F05138?style=flat-square&logo=swift&logoColor=white)](https://www.swift.org/)
 [![Release](https://img.shields.io/github/v/release/JRaunak/Burn?style=flat-square)](https://github.com/JRaunak/Burn/releases/latest)
 
-[Install](#install) • [What it shows](#what-it-shows) • [Sources](#sources) • [How cost is computed](#how-cost-is-computed) • [Troubleshooting](#troubleshooting)
+[Install](#install) • [What it shows](#what-it-shows) • [What it counts](#what-it-counts) • [Spend alerts](#spend-alerts) • [How cost is computed](#how-cost-is-computed) • [Troubleshooting](#troubleshooting)
 
 </div>
 
-Burn puts today's Claude Code spend in the menu bar. Click it for today's breakdown by project, model, and main agent vs subagents, or open History to filter any date range by project, model, session, and agent. It reads Claude Code's transcripts and, if you turn them on, its telemetry and your Bedrock invocation logs.
+Burn puts today's Claude Code spend in the menu bar. Click it for today's breakdown by project, model, and main agent vs subagents, or open History to filter any date range by project, model, session, and agent. It reads Claude Code's transcripts and, if you set it up, Claude Code's telemetry, and it can alert you when spend passes a daily, weekly, or monthly amount.
 
-It uses no AI tokens and makes no network requests unless you turn on the Bedrock source. It never writes to `~/.claude`.
+It uses no AI tokens and makes no network requests. Telemetry arrives on a listener bound to 127.0.0.1. Burn only reads `~/.claude`, except when you set up or remove telemetry in Settings and confirm the change.
 
 ## Install
 
@@ -31,6 +31,10 @@ curl -fsSL https://raw.githubusercontent.com/JRaunak/Burn/master/install.sh | ba
 
 The first time Burn runs from `/Applications` or `~/Applications`, it adds itself as a login item, and macOS shows a notification when it does. Turn it off with "Open at login" in Burn's Settings, or under System Settings > General > Login Items. A managed Mac can block login items by policy; Settings shows the error if it does. A copy run from `build/` never registers itself.
 
+### Update
+
+Run the install command again. It installs the latest release over the old app. Your data in `~/Library/Application Support/Burn`, your Settings, and the telemetry setup in `~/.claude/settings.json` are kept. Updates never replace `pricing.json` there, so new shipped prices don't reach you on their own (see [pricing.json](#pricingjson)).
+
 ## Requirements
 
 | Requirement | Notes |
@@ -39,7 +43,6 @@ The first time Burn runs from `/Applications` or `~/Applications`, it adds itsel
 | Apple Silicon | For the release build. A source build targets the Mac that builds it. |
 | Claude Code | Burn reads what it writes under `~/.claude/projects`. |
 | Xcode Command Line Tools | Only to build from source (`xcode-select --install`). Full Xcode and an Apple developer account aren't needed. |
-| `aws` CLI | Only for the Bedrock source. |
 
 ## Build from source
 
@@ -71,98 +74,91 @@ The flame next to the total is monochrome while nothing is being spent. It turns
 Click the total for:
 
 - today's and this month's totals
-- the source picker (see [Sources](#sources))
 - today's spend by project, by model, and main agent vs subagents, each up to six rows, with the smallest folded into "Other" so the list adds up to the total
-- a warning naming any unpriced models, and any errors from pricing or a source
+- a warning naming any unpriced models, and any errors from pricing, transcripts, telemetry, or notifications
+- one line saying what the totals count (see [What it counts](#what-it-counts))
 - History, Settings, and Quit
 
 ### History
 
-Filters for source, date range, project, model, and agent (all, main agent, or subagents). The range starts at the first of this month and runs through today; if "To" is today, it keeps following today. Above the chart are the total, token count, active days, and unpriced tokens when there are any.
+Filters for date range, project, model, and agent (all, main agent, or subagents). The range starts at the first of this month and runs through today; if "To" is today, it keeps following today. Above the chart are the total, token count, active days, and unpriced tokens when there are any.
 
 The chart shows daily cost stacked by model. Below it, the 500 most expensive sessions in the range, with start time, project, message count, subagent share, and cost. Click a session ID to filter to that session; click it again, or the "Session … ✕" button, to clear it. Closing the window resets the filters.
 
-## Sources
+## What it counts
 
-Pick a source in the popover or the History window. The default, "All Claude Code", is the one to read as your cost.
+Every total in Burn counts every transcript row, plus the telemetry rows that have no matching transcript row (same session and same token counts). Those are the calls Claude Code never writes to transcripts. Without telemetry the totals are the transcripts alone.
 
 ```mermaid
 flowchart LR
   T["~/.claude/projects/**/*.jsonl"] -->|FSEvents, appended bytes only| DB[(usage.db)]
-  O["Claude Code telemetry<br/>OTLP to 127.0.0.1:4318"] --> DB
-  B["Bedrock invocation logs<br/>aws CLI every 15 min"] --> DB
+  O["Claude Code telemetry<br/>OTLP logs to 127.0.0.1:4318"] -->|only while set up| DB
   P[pricing.json] --> DB
-  DB --> A[All Claude Code]
-  DB --> TO[Transcripts only]
-  DB --> OO[Telemetry only]
-  DB --> BL[Bedrock logs]
+  DB -->|transcript rows + unmatched telemetry rows| U[Menu bar, popover, History, alerts]
 ```
-
-| Source | What it counts |
-| ------ | -------------- |
-| All Claude Code | Every transcript row, plus the telemetry rows that have no matching transcript row (same session and same token counts). Those are the calls Claude Code never writes to transcripts. Without telemetry it equals the transcripts. |
-| Transcripts only | What Claude Code wrote to its transcripts. On by default. |
-| Telemetry only | Claude Code's own per-request cost, since you turned telemetry on. Opt-in. |
-| Bedrock logs | Every Bedrock call made by your AWS identity, Claude Code included. Opt-in, uses the network. |
-
-Bedrock logs are never added to the others, because they already include Claude Code's own calls. "Transcripts only" and "Telemetry only" are there to drill into.
 
 ### Claude Code transcripts
 
-Burn reads `~/.claude/projects/**/*.jsonl` and never writes to `~/.claude`. It watches the folder with FSEvents and reads only what was appended since the byte offset it stored for each file. Files under a `subagents/` folder, or messages marked as sidechain, count as subagent usage.
+Burn reads `~/.claude/projects/**/*.jsonl`. It watches the folder with FSEvents and reads only what was appended since the byte offset it stored for each file. Files under a `subagents/` folder, or messages marked as sidechain, count as subagent usage.
 
 Claude Code deletes old transcripts after its retention period, so history from before Burn's first run is limited to what was still on disk. Rows already in Burn's database stay after the files are deleted.
 
-Calls Claude Code doesn't write to transcripts are missing, and they're real money. In one session Claude Code's own records counted 470,208 uncached Opus input tokens that its transcripts showed as 376, so Burn read about 18% under the statusline. Telemetry receives those calls, and "All Claude Code" adds them on top of the transcripts. Two different untracked calls with identical token counts in one session would count once.
+Calls Claude Code doesn't write to transcripts are missing, and they're real money. In one session Claude Code's own records counted 470,208 uncached Opus input tokens that its transcripts showed as 376, so Burn read about 18% under the statusline. Telemetry receives those calls, and Burn adds them on top of the transcripts. Two different untracked calls with identical token counts in one session would count once.
 
 ### Claude Code telemetry (opt-in, localhost only)
 
-Turn on "Listen on 127.0.0.1:4318" in Settings. Burn accepts OTLP http/json logs on that address and records the `cost_usd` of each `api_request` event, so this source uses Claude Code's own per-request cost rather than the prices in `pricing.json`. Burn doesn't change your Claude Code config. Add these to the `env` block of `~/.claude/settings.json` yourself:
+Click "Set up telemetry" under Claude Code telemetry in Settings. Burn lists the changes and asks before it writes anything. It adds only the logs keys to the `env` block of `~/.claude/settings.json`:
 
-```json
-"env": {
-  "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
-  "OTEL_LOGS_EXPORTER": "otlp",
-  "OTEL_EXPORTER_OTLP_PROTOCOL": "http/json",
-  "OTEL_EXPORTER_OTLP_ENDPOINT": "http://127.0.0.1:4318"
-}
-```
+| Key | Value |
+| --- | ----- |
+| `CLAUDE_CODE_ENABLE_TELEMETRY` | `1` |
+| `OTEL_LOGS_EXPORTER` | `otlp`, appended to the list if you already have exporters there |
+| `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` | `http://127.0.0.1:4318/v1/logs` |
+| `OTEL_EXPORTER_OTLP_LOGS_PROTOCOL` | `http/json` |
 
-It covers only the time since telemetry was turned on. Telemetry events carry a short model name, so whether a request paid the regional premium is decided by the provider Claude Code is configured for (see [Regional pricing](#regional-pricing)). The main agent vs subagent split is unreliable for telemetry: Burn counts an event as subagent usage only when its `query_source` is `subagent`, and Agent SDK sessions report `sdk`.
+Before writing, Burn copies the file to `~/.claude/settings.json.bak-burn-<yyyyMMdd-HHmmss>`. It rewrites the file with its keys sorted, so other settings may move but keep their values. Metrics, traces, and any other collector you have configured are left as they are. If you pasted the env block from an earlier version of this README, setup also removes the generic `OTEL_EXPORTER_OTLP_ENDPOINT` (when it points at Burn) and an `OTEL_EXPORTER_OTLP_PROTOCOL` of `http/json`, because those also route metrics and traces.
 
-### Bedrock invocation logs (opt-in, uses the network)
+The change applies to Claude Code sessions started afterwards. Burn runs its listener on 127.0.0.1:4318 only while `~/.claude/settings.json` points Claude Code's logs at it, and rechecks the file at launch, when Settings opens, and when Burn comes to the front while Settings is open.
 
-Turn on "Enabled" under Bedrock in Settings. Every 15 minutes Burn runs the installed `aws` CLI over six-hour windows since the last sync:
+"Remove" puts every key Burn changed back to the value it had before setup, and unsets the ones that weren't there, `CLAUDE_CODE_ENABLE_TELEMETRY` included. A key you have changed since setup is left as you set it. It also asks first and makes a backup.
 
-```sh
-aws logs filter-log-events --log-group-name <log group> \
-  --start-time <ms> --end-time <ms> \
-  --filter-pattern '{ $.identity.arn = "*<identity>*" }' \
-  --query 'events[].message' --output json \
-  --profile <profile> --region <region>
-```
+Burn refuses to set up telemetry, and says why in Settings, when:
 
-| Setting | Default |
-| ------- | ------- |
-| AWS profile | `profile` in the `bedrock` block of `~/.claude/settings.json`, else `default` |
-| Region | `region` in that block, else `us-east-1` |
-| Log group | `/aws/bedrock/modelinvocations` |
-| Identity contains | Empty. Matched against `identity.arn`. "Detect" fills it from `aws sts get-caller-identity`. |
-| First sync looks back | 7 days (1 to 90) |
+- your organization's managed settings (`/Library/Application Support/ClaudeCode/managed-settings.json`, `managed-settings.d/`, or the `com.anthropic.claudecode` managed preferences) set an OTLP endpoint, headers, client certificate, a protocol other than `http/json`, or an `OTEL_LOGS_EXPORTER` without `otlp`
+- your logs already go to another OTLP endpoint, which adding Burn would replace
+- `OTEL_LOGS_EXPORTER` includes `none`
+- `~/.claude/settings.json` isn't valid JSON with an `env` object
 
-"Sync now" runs a sync immediately. Burn looks for `aws` only at `/opt/homebrew/bin/aws`, `/usr/local/bin/aws`, and `/usr/bin/aws`. Your identity needs read access to the log group, and an admin has to have turned on Bedrock invocation logging to it. These rows show under the project "Bedrock".
+Burn records the `cost_usd` of each `api_request` event, so telemetry rows use Claude Code's own per-request cost rather than the prices in `pricing.json`. It covers only the time since telemetry was set up. Telemetry events carry a short model name, so whether a request paid the regional premium is decided by the provider Claude Code is configured for (see [Regional pricing](#regional-pricing)). The main agent vs subagent split is unreliable for telemetry: Burn counts an event as subagent usage only when its `query_source` is `subagent`, and Agent SDK sessions report `sdk`.
 
-The log records contain full prompts and responses. Burn keeps only the token counts and discards the rest. CloudWatch Logs may charge for `filter-log-events` calls; this hasn't been checked, so look at your AWS pricing.
+## Spend alerts
+
+Set amounts in USD under Alerts in Settings: Daily, Weekly, and Monthly. An empty field is off. An amount is saved when you press Return or leave the field. Weeks start on the first weekday of your macOS region settings.
+
+Burn checks the totals on each refresh. When a period's total reaches its amount, the alert fires once for that period, for example "$52.10 today. Over your $50 daily alert." Changing the amount re-arms it for the current period. Unpriced usage isn't in the total, and the alert adds "Plus unpriced usage." when there is some.
+
+Each alert arrives two ways:
+
+| | macOS notification | Burn's banner |
+| - | ------------------ | ------------- |
+| Where | Notification Center | Top-right of the display where you last clicked Burn, one per period |
+| Needs permission | Yes. macOS may not show a permission prompt for an ad-hoc signed app, so switch Burn on in System Settings > Notifications. Settings > Alerts shows the current state and has an "Open System Settings" button. | No |
+| During screen sharing or Focus | Hidden by macOS | Shown, unless you turn on "Hide banner when sharing the screen" (off by default) |
+| Sound | None | Burn plays the chosen sound once each time alerts fire |
+
+The banner closes after 8 seconds (15 with VoiceOver on), stays while the pointer is over it, and has a close button on hover. Clicking it opens History for that period.
+
+"Sound" lists the system sounds in `/System/Library/Sounds` (default Glass, or None) and plays the one you pick. "Send test notification" sends a sample daily alert both ways, with the sound.
 
 ## How cost is computed
 
-Claude Code transcripts and Bedrock logs record tokens, not dollars, so Burn prices each assistant message itself. Streaming writes the same `message.id` more than once while `output_tokens` grows, so Burn keeps one row per id with the largest `output_tokens`.
+Claude Code transcripts record tokens, not dollars, so Burn prices each assistant message itself. Streaming writes the same `message.id` more than once while `output_tokens` grows, so Burn keeps one row per id with the largest `output_tokens`.
 
 ### pricing.json
 
 Prices come from `~/Library/Application Support/Burn/pricing.json`, in USD per million tokens with `input`, `output`, `cacheWrite`, and `cacheRead` per model. Open it from Settings with "Open pricing.json". Burn re-reads it when its modification time changes, which it checks on each refresh (new usage, opening the popover, or every 5 minutes). Model keys are matched after stripping region prefixes, `anthropic.`, `[1m]`, date suffixes, and `-v1:0`, so `us.anthropic.claude-haiku-4-5-20251001-v1:0` matches `claude-haiku-4-5`.
 
-The bundled `Resources/pricing.json` is only copied there on first run. Rebuilding Burn with a new one doesn't change the file you already have; edit it, or delete it to get the new one.
+The bundled `Resources/pricing.json` is only copied there when the file doesn't exist. Updating or rebuilding Burn with a new one doesn't change the file you already have; edit it, or delete it to get the new one.
 
 The shipped prices for Opus 5.5, Opus 4.8, Sonnet 5 and Haiku 4.5 were fitted from Claude Code's own cost-state records, so they match the cost in Claude Code's statusline. The rest come from Anthropic's pricing page, and the fitted ones match it too. All of them are list prices.
 
@@ -200,7 +196,7 @@ Everything is stored in `~/Library/Application Support/Burn/usage.db`, a SQLite 
 
 "Re-read all transcripts" in Settings clears the stored file offsets and reads every transcript again. Existing rows are kept, so nothing is counted twice.
 
-To start over, quit Burn and delete `usage.db` (and `usage.db-wal` and `usage.db-shm` if present). Burn rebuilds it from the transcripts still on disk. Usage from deleted transcripts and from the Bedrock and telemetry sources is lost.
+To start over, quit Burn and delete `usage.db` (and `usage.db-wal` and `usage.db-shm` if present). Burn rebuilds it from the transcripts still on disk. Usage from deleted transcripts and from telemetry is lost.
 
 ## Troubleshooting
 
@@ -209,10 +205,16 @@ To start over, quit Burn and delete `usage.db` (and `usage.db-wal` and `usage.db
 - The total stays at "Indexing…". The first full read of `~/.claude/projects` is running. It shows only when Burn has no stored file offsets: on first run, after you delete `usage.db`, and after "Re-read all transcripts".
 - A "+" after a total. Some models have no price. The popover names them; add them to `pricing.json`.
 - "pricing.json: … is missing input" (or another field). Every priced model needs all four prices, and an `above` block needs `tokens` too. Until you fix it, Burn keeps the prices from the last good load; after a relaunch every model is unpriced.
-- "aws CLI not found". `aws` isn't at one of the three paths Burn checks.
-- "Set your AWS identity in Settings first." The Bedrock source needs "Identity contains". Use "Detect".
-- "Port 4318: …" in the popover. The telemetry listener couldn't bind 127.0.0.1:4318, usually because something else is listening there.
-- Telemetry is on but "Telemetry only" stays empty. Check that the `env` block above is in `~/.claude/settings.json`. Burn only listens; it doesn't turn on Claude Code's exporter.
+- "Can't listen on 127.0.0.1:4318: …" in the popover or Settings. Something else holds the port. `lsof -nP -iTCP:4318 -sTCP:LISTEN` shows what; stop it, or remove Burn's telemetry setup.
+- Telemetry is set up but adds nothing. It applies only to Claude Code sessions started after setup; restart the session.
+- "Your organization's managed settings control Claude Code telemetry, so Burn can't receive it." Managed settings win over `~/.claude/settings.json`, and Burn doesn't touch them. The totals are the transcripts alone.
+- "Claude Code already sends its logs to …; adding Burn would replace that." Claude Code sends logs to one OTLP endpoint, and you already have one. Burn won't take it over.
+- "OTEL_LOGS_EXPORTER in ~/.claude/settings.json includes "none", …". Remove `none` yourself if you want Claude Code's logs, then set up again.
+- "~/.claude/settings.json isn't valid JSON with an "env" object, so Burn won't edit it." Fix the file; Burn won't rewrite one it can't parse.
+- "Couldn't change ~/.claude/settings.json: …" in Settings. The file couldn't be read, backed up, or written, and the message gives the error. Burn writes atomically, so the file is left as it was.
+- "Notifications are turned off for Burn." in Settings > Alerts, or no macOS notification. Turn Burn on in System Settings > Notifications > Burn. Burn's own banner shows either way.
+- "Notification not sent: …" in the popover or Settings. macOS refused the notification; check System Settings > Notifications > Burn.
+- An alert's macOS notification didn't show while sharing the screen or in Focus. macOS hides it then. Burn's banner still shows unless "Hide banner when sharing the screen" is on.
 - "Login item: …" in Settings. macOS refused the login item, usually because a managed Mac blocks them by policy.
 
 ## Icon

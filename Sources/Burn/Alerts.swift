@@ -25,15 +25,13 @@ enum Alerts {
         let key: String
         let period: Period
         let range: DateInterval
-        let source: String
         let spent: Double
         let threshold: Double
         let unpriced: Bool
         var test = false
 
-        static func sample(source: String) -> Due {
-            Due(key: "test", period: .day, range: Period.day.interval(Date()), source: source,
-                spent: 52.10, threshold: 50, unpriced: false, test: true)
+        static var sample: Due {
+            Due(key: "test", period: .day, range: Period.day.interval(Date()), spent: 52.10, threshold: 50, unpriced: false, test: true)
         }
 
         var detail: String {
@@ -45,7 +43,7 @@ enum Alerts {
         }
 
         var history: Filter {
-            var f = Filter(source: source)
+            var f = Filter()
             f.from = range.start
             f.to = range.end > Date() ? nil : range.end.addingTimeInterval(-1)
             return f
@@ -54,7 +52,7 @@ enum Alerts {
 
     /// A fired record survives only while its period is current and its amount unchanged, which
     /// both prunes the list and re-arms an alert whose amount changed.
-    static func check(now: Date, cal: Calendar, source: String, amounts: [Period: Double],
+    static func check(now: Date, cal: Calendar, amounts: [Period: Double],
                       spent: [Period: Summary], fired: [String]) -> (due: [Due], fired: [String]) {
         var due: [Due] = []
         var keep: [String] = []
@@ -63,10 +61,11 @@ enum Alerts {
             let range = p.interval(now, cal)
             let prefix = "\(p.rawValue)|\(Int(range.start.timeIntervalSince1970))|\(amount)|"
             keep += fired.filter { $0.hasPrefix(prefix) }
-            let key = prefix + source
+            // The suffix named the source when there was a choice; kept so records made then stay valid.
+            let key = prefix + "claude-code"
             guard let s = spent[p], s.cost >= amount, !fired.contains(key) else { continue }
             keep.append(key)
-            due.append(Due(key: key, period: p, range: range, source: source, spent: s.cost, threshold: amount,
+            due.append(Due(key: key, period: p, range: range, spent: s.cost, threshold: amount,
                            unpriced: s.unpricedTokens > 0))
         }
         return (due, keep)
