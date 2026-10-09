@@ -26,6 +26,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var outsideClicks: Any?
     /// An off-screen copy of the popover content at its natural height, used only for measuring.
     private var sizer: NSHostingView<AnyView>!
+    /// The popover hangs off this instead of the status button. A popover re-anchors whenever it
+    /// resizes, and over a fullscreen app the hidden menu bar slides the button offscreen, so the
+    /// popover followed it. This stays where the button was when the popover opened.
+    private let anchor: NSWindow = {
+        let w = NSWindow(contentRect: .zero, styleMask: .borderless, backing: .buffered, defer: true)
+        w.isOpaque = false
+        w.backgroundColor = .clear
+        w.ignoresMouseEvents = true
+        w.level = .statusBar
+        w.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
+        return w
+    }()
 
     func applicationDidFinishLaunching(_ note: Notification) {
         Windows.shared.model = model
@@ -35,16 +47,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         let content = { [unowned self] in
             PopoverView(close: { [weak self] in self?.popover.performClose(nil) }).environmentObject(model)
         }
-        // Size is set by hand: every automatic resize re-anchors the popover, and over a fullscreen
-        // app (menu bar hidden) that re-anchoring makes it jump. Content is pinned to the top so
-        // spare height sits at the bottom.
+        // Sized by hand from `sizer`, so SwiftUI's own resizing doesn't fight it.
         let hosting = NSHostingController(rootView: AnyView(content().frame(maxHeight: .infinity, alignment: .top)))
         hosting.sizingOptions = []
         sizer = NSHostingView(rootView: AnyView(content().fixedSize(horizontal: false, vertical: true)))
         popover.contentViewController = hosting
         model.objectWillChange
             .debounce(for: .milliseconds(50), scheduler: RunLoop.main)
-            .sink { [weak self] in self?.growToFit() }
+            .sink { [weak self] in self?.fit() }
             .store(in: &subs)
 
         guard let button = item.button else { return }
@@ -72,8 +82,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             popover.performClose(nil)
         } else {
             model.refresh()
+            guard let buttonWindow = button.window else { return }
+            anchor.setFrame(buttonWindow.convertToScreen(button.convert(button.bounds, to: nil)), display: false)
+            anchor.orderFront(nil)
             popover.contentSize = sizer.fittingSize
-            popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+            popover.show(relativeTo: anchor.contentView!.bounds, of: anchor.contentView!, preferredEdge: .minY)
+            button.highlight(true)
             popover.contentViewController?.view.window?.makeKey()
             // .transient only sees clicks inside this app; an accessory app is rarely the active one,
             // so clicks in other apps and on the desktop are caught here instead.
@@ -83,18 +97,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         }
     }
 
-    /// While open, the popover only grows; shorter content leaves space at the bottom instead of moving it.
-    private func growToFit() {
+    private func fit() {
         guard popover.isShown else { return }
-        let fit = sizer.fittingSize
-        if fit.height > popover.contentSize.height + 0.5 {
-            popover.contentSize = NSSize(width: popover.contentSize.width, height: fit.height)
-        }
+        let size = sizer.fittingSize
+        if abs(size.height - popover.contentSize.height) > 0.5 { popover.contentSize = size }
     }
 
     func popoverDidClose(_ notification: Notification) {
         if let m = outsideClicks { NSEvent.removeMonitor(m) }
         outsideClicks = nil
+        anchor.orderOut(nil)
+        item.button?.highlight(false)
     }
 }
 
