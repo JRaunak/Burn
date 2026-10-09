@@ -3,7 +3,7 @@ import SwiftUI
 
 struct HistoryView: View {
     @EnvironmentObject var model: AppModel
-    @StateObject private var h = HistoryModel()
+    @ObservedObject var h: HistoryModel
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -50,7 +50,7 @@ struct HistoryView: View {
         }
         .padding(16)
         .frame(minWidth: 860, minHeight: 600)
-        .onAppear { h.filter.source = model.source; load() }
+        .onAppear(perform: load)
         .onChange(of: h.filter) { load() }
         // Project, model and session lists differ per source, so stale picks would show nothing.
         .onChange(of: h.filter.source) {

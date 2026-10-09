@@ -21,6 +21,8 @@ struct SettingsView: View {
                 }))
             }
 
+            AlertsSection(notifier: model.notifier, changed: model.refresh, test: model.testAlert)
+
             Section("Pricing") {
                 Text(model.pricing.url.path).font(.caption).textSelection(.enabled)
                 Text("Regional premium applies to messages from regional or US-only endpoints. \(model.transcripts.endpoints.summary).")
@@ -78,6 +80,86 @@ struct SettingsView: View {
             }
         }
     }
+}
+
+struct AlertsSection: View {
+    @ObservedObject var notifier: Notifier
+    let changed: () -> Void
+    let test: () -> Void
+    @AppStorage("alert.sound") private var sound = Settings.defaultSound
+    @AppStorage("alert.day") private var daily: Double?
+    @AppStorage("alert.week") private var weekly: Double?
+    @AppStorage("alert.month") private var monthly: Double?
+    @AppStorage("alert.hideWhenSharing") private var hideWhenSharing = false
+
+    var body: some View {
+        Section("Alerts") {
+            AmountField(label: "Daily (USD)", amount: amount($daily))
+            AmountField(label: "Weekly (USD)", amount: amount($weekly))
+            AmountField(label: "Monthly (USD)", amount: amount($monthly))
+            Picker("Sound", selection: Binding(get: { sound }, set: { sound = $0; NSSound(named: $0)?.play() })) {
+                Text("None").tag("")
+                ForEach(Settings.systemSounds, id: \.self) { Text($0).tag($0) }
+            }
+            HStack {
+                switch notifier.status {
+                case .denied?:
+                    Text("Notifications are turned off for Burn.")
+                    Button("Open System Settings") {
+                        NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension")!)
+                    }
+                case .authorized?, .provisional?:
+                    Text("Notifications allowed.")
+                default:
+                    Text("Notifications not requested yet.")
+                }
+                Spacer()
+                Button("Send test notification", action: test)
+            }
+            Toggle("Hide banner when sharing the screen", isOn: $hideWhenSharing)
+            if !notifier.error.isEmpty { Text(notifier.error).font(.caption).foregroundStyle(.red) }
+            Text("Watches the selected source. Each alert fires once per period; changing the amount re-arms it.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+        .onAppear(perform: notifier.refreshStatus)
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in notifier.refreshStatus() }
+    }
+
+    private func amount(_ stored: Binding<Double?>) -> Binding<Double?> {
+        Binding(get: { stored.wrappedValue }, set: {
+            guard $0 != stored.wrappedValue else { return }
+            stored.wrappedValue = $0
+            if $0 != nil { notifier.authorize() }
+            changed()
+        })
+    }
+}
+
+/// Saves on Return or focus loss only; a value TextField saves each keystroke, so typing 100 fired a $1 alert.
+private struct AmountField: View {
+    let label: String
+    @Binding var amount: Double?
+    @StateObject private var draft = Draft()
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        TextField(label, text: $draft.text, prompt: Text("Off"))
+            .focused($focused)
+            .onSubmit(commit)
+            .onChange(of: focused) { _, now in if !now { commit() } }
+            .onAppear(perform: show)
+    }
+
+    private func commit() {
+        amount = try? Double(draft.text, format: .number)
+        show()
+    }
+
+    private func show() { draft.text = amount?.formatted(.number) ?? "" }
+}
+
+private final class Draft: ObservableObject {
+    @Published var text = ""
 }
 
 final class Note: ObservableObject {

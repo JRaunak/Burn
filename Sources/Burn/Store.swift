@@ -158,6 +158,8 @@ final class AppModel: ObservableObject {
     @Published var scanning = false
     /// Separate object so a frame tick redraws only the menu-bar label.
     let flame = FlameFrame()
+    let notifier = Notifier()
+    let banners = Banners()
     @Published var source = UserDefaults.standard.string(forKey: "source") ?? Sources.combined {
         didSet { UserDefaults.standard.set(source, forKey: "source"); refresh() }
     }
@@ -193,6 +195,7 @@ final class AppModel: ObservableObject {
         pricing = Pricing(dir: dir)
         transcripts = TranscriptSource(db: db)
         bedrock = BedrockLogSource(db: db) { Settings.bedrockConfig() }
+        notifier.report = { [weak self] in self?.report($0) }
 
         transcripts.start { [weak self] in self?.refresh() }
         if Settings.bedrockEnabled { bedrock.start { [weak self] in self?.refresh() } }
@@ -238,17 +241,21 @@ final class AppModel: ObservableObject {
         pending = false
         // `source` belongs to the main thread; its didSet writes the default before calling refresh.
         let source = UserDefaults.standard.string(forKey: "source") ?? Sources.combined
-        let cal = Calendar.current
+        let now = Date()
+        let amounts = Settings.alertAmounts
         var t = Filter(source: source)
-        t.from = cal.startOfDay(for: Date())
+        t.from = Period.day.start(now)
         var m = t
-        m.from = cal.date(from: cal.dateComponents([.year, .month], from: Date()))!
-        let result = db.queue.sync { () -> (Summary, Summary, [Slice], [Slice], [Slice], String?) in
+        m.from = Period.month.start(now)
+        var w = t
+        w.from = Period.week.start(now)
+        let result = db.queue.sync { () -> (Summary, Summary, [Slice], [Slice], [Slice], String?, Summary?) in
             pricing.reloadIfChanged(into: db)
             return (Q.summary(db, t), Q.summary(db, m),
                     Q.breakdown(db, t, by: "m.project"),
                     Q.breakdown(db, t, by: "m.model"),
-                    Q.breakdown(db, t, by: "CASE WHEN m.sidechain=1 THEN 'Subagents' ELSE 'Main agent' END"), pricing.error)
+                    Q.breakdown(db, t, by: "CASE WHEN m.sidechain=1 THEN 'Subagents' ELSE 'Main agent' END"), pricing.error,
+                    amounts[.week] == nil ? nil : Q.summary(db, w))
         }
         let stored = source == Sources.combined ? [Sources.transcripts, Sources.otel] : [source]
         let latest = db.queue.sync {
@@ -268,7 +275,26 @@ final class AppModel: ObservableObject {
             if self.scanning != scanning { self.scanning = scanning }
             self.lastUsage = latest
             self.updateFlicker()
+            var spent: [Period: Summary] = [.day: result.0, .month: result.1]
+            spent[.week] = result.6
+            let old = Settings.alertsFired
+            let (due, fired) = Alerts.check(now: now, cal: .current, source: source, amounts: amounts, spent: spent, fired: old)
+            if fired != old { Settings.alertsFired = fired }
+            due.forEach(self.notifier.send)
+            self.present(due)
         }
+    }
+
+    func testAlert() {
+        let due = Alerts.Due.sample(source: source)
+        notifier.test(due)
+        present([due])
+    }
+
+    private func present(_ due: [Alerts.Due]) {
+        guard !due.isEmpty else { return }
+        banners.show(due)
+        if let s = Settings.alertSound { NSSound(named: s)?.play() }
     }
 
     /// One flicker cycle each time new usage lands. On macOS 26 every status-item image change
@@ -333,6 +359,24 @@ enum Settings {
         set { d.set(newValue, forKey: "otel.enabled") }
     }
     static var otelPort: Int { d.object(forKey: "otel.port") as? Int ?? 4318 }
+
+    /// "alert.day" and so on; a missing key means that alert is off.
+    static var alertAmounts: [Period: Double] {
+        Dictionary(uniqueKeysWithValues: Period.allCases.compactMap { p in (d.object(forKey: "alert." + p.rawValue) as? Double).map { (p, $0) } })
+    }
+    static let defaultSound = "Glass"
+    static let systemSounds = ((try? FileManager.default.contentsOfDirectory(atPath: "/System/Library/Sounds")) ?? [])
+        .filter { $0.hasSuffix(".aiff") }.map { String($0.dropLast(5)) }.sorted()
+    /// Empty means None.
+    static var alertSound: String? {
+        let s = d.string(forKey: "alert.sound") ?? defaultSound
+        return s.isEmpty ? nil : s
+    }
+    static var alertHideWhenSharing: Bool { d.bool(forKey: "alert.hideWhenSharing") }
+    static var alertsFired: [String] {
+        get { d.stringArray(forKey: "alerts.fired") ?? [] }
+        set { d.set(newValue, forKey: "alerts.fired") }
+    }
 
     /// Defaults come from the bedrock block in ~/.claude/settings.json, read only.
     static func bedrockConfig() -> BedrockLogSource.Config {

@@ -57,6 +57,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     func applicationDidFinishLaunching(_ note: Notification) {
         Windows.shared.model = model
+        model.banners.screen = { [weak self] in self?.item.button?.window?.screen }
         if let e = LoginItem.registerOnFirstLaunch() { model.report(e) }
         // .transient treated a click on the status button as an outside click, so the button
         // reopened what it had just closed. Every close is triggered by hand instead.
@@ -107,7 +108,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             popover.show(relativeTo: anchor.contentView!.bounds, of: anchor.contentView!, preferredEdge: .minY)
             button.highlight(true)
             // Otherwise the popover can't take Esc while another app is active.
-            NSApp.activate(ignoringOtherApps: true)
+            NSApp.activate()
             popover.contentViewController?.view.window?.makeKey()
             watchForClose()
         }
@@ -116,7 +117,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private func watchForClose() {
         let close = { [weak self] in self?.popover.performClose(nil) }
         monitors = [
-            NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { _ in close() },
+            // Activation is only a request since macOS 14, so Burn can stay inactive and its own
+            // popover and status-button clicks arrive here too. The button's action handles those.
+            NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
+                guard let self else { return }
+                let ours = [self.popover.contentViewController?.view.window?.frame,
+                            self.item.button.flatMap { b in b.window?.convertToScreen(b.convert(b.bounds, to: nil)) }]
+                if !ours.contains(where: { $0?.contains(NSEvent.mouseLocation) == true }) { close() }
+            },
             NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .keyDown]) { [weak self] e in
                 guard let self, let w = e.window else { return e }
                 if e.type == .keyDown {
@@ -152,9 +160,15 @@ final class Windows: NSObject, NSWindowDelegate {
     static let shared = Windows()
     var model: AppModel!
     private var open: [String: NSWindow] = [:]
+    private var history: HistoryModel?
+
+    func showHistory(_ filter: Filter) {
+        show("history")
+        history?.filter = filter
+    }
 
     func show(_ id: String) {
-        NSApp.activate(ignoringOtherApps: true)
+        NSApp.activate()
         // The screen the user clicked the menu-bar item on; the mouse is still there.
         let screen = NSScreen.screens.first { NSMouseInRect(NSEvent.mouseLocation, $0.frame, false) } ?? NSScreen.main
         if let w = open[id] {
@@ -162,9 +176,15 @@ final class Windows: NSObject, NSWindowDelegate {
             w.makeKeyAndOrderFront(nil)
             return
         }
-        let (title, view): (String, AnyView) = id == "history"
-            ? ("Burn History", AnyView(HistoryView().environmentObject(model)))
-            : ("Burn Settings", AnyView(SettingsView().environmentObject(model)))
+        let title: String, view: AnyView
+        if id == "history" {
+            let h = HistoryModel()
+            h.filter.source = model.source
+            history = h
+            (title, view) = ("Burn History", AnyView(HistoryView(h: h).environmentObject(model)))
+        } else {
+            (title, view) = ("Burn Settings", AnyView(SettingsView().environmentObject(model)))
+        }
         let w = NSWindow(contentViewController: NSHostingController(rootView: view))
         w.title = title
         w.isReleasedWhenClosed = false
@@ -190,6 +210,7 @@ final class Windows: NSObject, NSWindowDelegate {
     /// Closing discards the window, so filters and other view state start fresh next time.
     func windowWillClose(_ note: Notification) {
         guard let w = note.object as? NSWindow else { return }
+        if open["history"] === w { history = nil }
         open = open.filter { $0.value !== w }
     }
 }
