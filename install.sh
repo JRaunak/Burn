@@ -22,6 +22,7 @@ tar -xzf "$tmp/Burn.tar.gz" -C "$tmp"
 
 mkdir -p "$dest"
 pkill -x Burn 2>/dev/null || true
+while pgrep -x Burn >/dev/null; do sleep 0.1; done
 rm -rf "$dest/Burn.app"
 mv "$tmp/Burn.app" "$dest/"
 open "$dest/Burn.app"

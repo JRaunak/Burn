@@ -3,7 +3,8 @@ import Foundation
 /// pricing.json lives in Application Support so it can be edited; edits are picked up on the next refresh.
 final class Pricing {
     let url: URL
-    private var loadedMTime: Date?
+    /// Not nil, so a missing pricing.json is reported on the first load instead of skipped.
+    private var loadedMTime: Date? = .distantPast
     private(set) var error: String?
 
     init(dir: URL) {

@@ -6,8 +6,8 @@ final class BedrockLogSource: UsageSource {
     let id = Sources.bedrock
     let label = "Bedrock invocation logs"
     let caveat = "Every Bedrock call made by your AWS identity, Claude Code included. Estimated with pricing.json, not your bill."
-    private(set) var lastError: String?
-    private(set) var lastSync: Date?
+    @Locked private(set) var lastError: String?
+    @Locked private(set) var lastSync: Date?
 
     private let db: DB
     private let queue = DispatchQueue(label: "burn.bedrock", qos: .utility)
@@ -58,7 +58,8 @@ final class BedrockLogSource: UsageSource {
         let c = config()
         guard !c.identity.isEmpty else { lastError = "Set your AWS identity in Settings first."; return }
         let nowMs = Int(Date().timeIntervalSince1970 * 1000)
-        var cursor = Int(db.queue.sync { db.state("bedrock.cursor") } ?? "") ?? (nowMs - c.lookbackDays * 86_400_000)
+        // Logs land in CloudWatch minutes after the call, so each sync re-reads the tail of the last one.
+        var cursor = Int(db.queue.sync { db.state("bedrock.cursor") } ?? "").map { $0 - 15 * 60_000 } ?? (nowMs - c.lookbackDays * 86_400_000)
         // Six-hour windows keep each CLI response small; the CLI paginates inside a window.
         let window = 6 * 3_600_000
         var wrote = false
@@ -124,9 +125,12 @@ final class BedrockLogSource: UsageSource {
         p.standardOutput = out
         p.standardError = err
         do { try p.run() } catch { return .failure(error) }
-        // Read before waiting, or a large response fills the pipe and the CLI blocks forever.
+        // Drain both pipes before waiting, or whichever fills first blocks the CLI forever.
+        var errData = Data()
+        let drained = DispatchGroup()
+        DispatchQueue.global(qos: .utility).async(group: drained) { errData = err.fileHandleForReading.readDataToEndOfFile() }
         let data = out.fileHandleForReading.readDataToEndOfFile()
-        let errData = err.fileHandleForReading.readDataToEndOfFile()
+        drained.wait()
         p.waitUntilExit()
         guard p.terminationStatus == 0 else {
             let msg = String(decoding: errData, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)

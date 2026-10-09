@@ -12,8 +12,24 @@ enum BurnMain {
         let delegate = AppDelegate()
         app.delegate = delegate
         app.setActivationPolicy(.accessory)
+        app.mainMenu = editMenu()
         app.run()
     }
+}
+
+/// Never shown for an accessory app, but key equivalents still route through it, so without it
+/// Cmd-C/V/W do nothing in the Settings and History windows.
+private func editMenu() -> NSMenu {
+    let edit = NSMenu(title: "Edit")
+    edit.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+    edit.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+    edit.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+    edit.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+    edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+    edit.addItem(withTitle: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+    let menu = NSMenu()
+    menu.addItem(withTitle: "Edit", action: nil, keyEquivalent: "").submenu = edit
+    return menu
 }
 
 /// Owns the status item in AppKit. MenuBarExtra re-rendered its whole SwiftUI label on every
@@ -23,7 +39,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let popover = NSPopover()
     private var subs: Set<AnyCancellable> = []
-    private var outsideClicks: Any?
+    private var monitors: [Any] = []
     /// An off-screen copy of the popover content at its natural height, used only for measuring.
     private var sizer: NSHostingView<AnyView>!
     /// The popover hangs off this instead of the status button. A popover re-anchors whenever it
@@ -41,8 +57,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     func applicationDidFinishLaunching(_ note: Notification) {
         Windows.shared.model = model
-        LoginItem.registerOnFirstLaunch()
-        popover.behavior = .transient
+        if let e = LoginItem.registerOnFirstLaunch() { model.report(e) }
+        // .transient treated a click on the status button as an outside click, so the button
+        // reopened what it had just closed. Every close is triggered by hand instead.
+        popover.behavior = .applicationDefined
         popover.delegate = self
         let content = { [unowned self] in
             PopoverView(close: { [weak self] in self?.popover.performClose(nil) }).environmentObject(model)
@@ -88,13 +106,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             popover.contentSize = sizer.fittingSize
             popover.show(relativeTo: anchor.contentView!.bounds, of: anchor.contentView!, preferredEdge: .minY)
             button.highlight(true)
+            // Otherwise the popover can't take Esc while another app is active.
+            NSApp.activate(ignoringOtherApps: true)
             popover.contentViewController?.view.window?.makeKey()
-            // .transient only sees clicks inside this app; an accessory app is rarely the active one,
-            // so clicks in other apps and on the desktop are caught here instead.
-            outsideClicks = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
-                self?.popover.performClose(nil)
-            }
+            watchForClose()
         }
+    }
+
+    private func watchForClose() {
+        let close = { [weak self] in self?.popover.performClose(nil) }
+        monitors = [
+            NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { _ in close() },
+            NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .keyDown]) { [weak self] e in
+                guard let self, let w = e.window else { return e }
+                if e.type == .keyDown {
+                    guard e.keyCode == 53, w === self.popover.contentViewController?.view.window else { return e }
+                    close()
+                    return nil
+                }
+                if Windows.shared.owns(w) { close() }
+                return e
+            },
+        ].compactMap { $0 }
     }
 
     private func fit() {
@@ -104,10 +137,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     func popoverDidClose(_ notification: Notification) {
-        if let m = outsideClicks { NSEvent.removeMonitor(m) }
-        outsideClicks = nil
+        monitors.forEach(NSEvent.removeMonitor)
+        monitors = []
         anchor.orderOut(nil)
         item.button?.highlight(false)
+        // Hand focus back to the app the user was in, unless they moved on to a Burn window.
+        if NSApp.isActive && !Windows.shared.anyVisible { NSApp.hide(nil) }
     }
 }
 
@@ -143,6 +178,9 @@ final class Windows: NSObject, NSWindowDelegate {
         open[id] = w
     }
 
+    func owns(_ w: NSWindow) -> Bool { open.values.contains(w) }
+    var anyVisible: Bool { open.values.contains { $0.isVisible } }
+
     private func place(_ w: NSWindow, on screen: NSScreen?) {
         guard let area = screen?.visibleFrame else { return w.center() }
         let size = w.frame.size
@@ -164,28 +202,31 @@ enum LoginItem {
     static func set(_ on: Bool) -> String? {
         do {
             try on ? SMAppService.mainApp.register() : SMAppService.mainApp.unregister()
-            return nil
+            guard on, SMAppService.mainApp.status == .requiresApproval else { return nil }
+            SMAppService.openSystemSettingsLoginItems()
+            return "Allow Burn in System Settings > General > Login Items."
         } catch {
             return "Login item: \(error.localizedDescription)"
         }
     }
 
     /// Only for an installed copy, so a dev build in build/ never becomes the login item.
-    static func registerOnFirstLaunch() {
+    static func registerOnFirstLaunch() -> String? {
         let installed = ["/Applications/", NSHomeDirectory() + "/Applications/"].contains { Bundle.main.bundlePath.hasPrefix($0) }
-        guard installed, !UserDefaults.standard.bool(forKey: "loginItem.asked") else { return }
+        guard installed, !UserDefaults.standard.bool(forKey: "loginItem.asked") else { return nil }
         UserDefaults.standard.set(true, forKey: "loginItem.asked")
-        set(true)
+        return set(true)
     }
 }
 
 func usd(_ v: Double) -> String {
-    v >= 1000 ? String(format: "$%.0f", v) : String(format: "$%.2f", v)
+    v.formatted(.currency(code: "USD").precision(.fractionLength(v >= 1000 ? 0 : 2)))
 }
 
 func tokens(_ n: Int) -> String {
     switch n {
-    case 1_000_000...: return String(format: "%.1fM", Double(n) / 1e6)
+    // From here "%.0fk" would round up to "1000k".
+    case 999_500...: return String(format: "%.1fM", Double(n) / 1e6)
     case 1_000...: return String(format: "%.0fk", Double(n) / 1e3)
     default: return "\(n)"
     }

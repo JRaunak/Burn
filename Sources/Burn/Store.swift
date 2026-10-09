@@ -57,13 +57,13 @@ struct Summary: Equatable {
 }
 
 enum Q {
-    static let from = "FROM messages m LEFT JOIN prices p ON p.model = m.model LEFT JOIN otel_cut c ON c.session = m.session"
+    static let from = "FROM messages m LEFT JOIN prices p ON p.model = m.model"
     private static let tiered = "(p.tier_tokens IS NOT NULL AND m.input + m.cache_write + m.cache_read > p.tier_tokens)"
     static let cost = """
         (COALESCE(m.cost, CASE WHEN \(tiered)
             THEN (m.input*p.t_input + m.output*p.t_output + m.cache_write*p.t_cache_write + m.cache_read*p.t_cache_read)/1e6
             ELSE (m.input*p.input + m.output*p.output + m.cache_write*p.cache_write + m.cache_read*p.cache_read)/1e6 END)
-         * CASE WHEN m.premium = 1 THEN COALESCE(p.mult, 1) ELSE 1 END)
+         * CASE WHEN m.premium = 1 THEN COALESCE(p.mult, (SELECT mult FROM prices LIMIT 1), 1) ELSE 1 END)
         """
     static let tokens = "(m.input + m.output + m.cache_write + m.cache_read)"
     static let unpriced = "CASE WHEN m.cost IS NULL AND p.model IS NULL THEN \(tokens) ELSE 0 END"
@@ -71,10 +71,14 @@ enum Q {
     static func summary(_ db: DB, _ f: Filter) -> Summary {
         let (w, a) = f.sql()
         var s = Summary()
-        if let r = try? db.run("SELECT COALESCE(SUM(\(cost)),0), COALESCE(SUM(\(tokens)),0), COALESCE(SUM(\(unpriced)),0) \(from) WHERE \(w)", a).first {
+        if let r = try? db.run("""
+            SELECT COALESCE(SUM(\(cost)),0), COALESCE(SUM(\(tokens)),0), COALESCE(SUM(\(unpriced)),0),
+                   group_concat(DISTINCT CASE WHEN m.cost IS NULL AND p.model IS NULL THEN m.model END)
+            \(from) WHERE \(w)
+            """, a).first {
             s.cost = r.dbl(0); s.tokens = r.int(1); s.unpricedTokens = r.int(2)
+            s.unpricedModels = r.str(3).split(separator: ",").map(String.init).sorted()
         }
-        s.unpricedModels = ((try? db.run("SELECT DISTINCT m.model \(from) WHERE \(w) AND m.cost IS NULL AND p.model IS NULL", a)) ?? []).map { $0.str(0) }
         return s
     }
 
@@ -88,15 +92,38 @@ enum Q {
         return Array(slices.prefix(limit - 1)) + [Slice(name: "Other", cost: rest)]
     }
 
+    private static let day = "strftime('%Y-%m-%d', m.ts, 'unixepoch', 'localtime')"
+
+    private static func dayFormatter() -> DateFormatter {
+        let fmt = DateFormatter()
+        fmt.locale = Locale(identifier: "en_US_POSIX")
+        fmt.timeZone = .current
+        fmt.dateFormat = "yyyy-MM-dd"
+        return fmt
+    }
+
+    /// Fully unpriced model-days are left out rather than drawn as $0.
     static func daily(_ db: DB, _ f: Filter) -> [DayCost] {
         let (w, a) = f.sql()
-        let fmt = DateFormatter()
-        fmt.dateFormat = "yyyy-MM-dd"
+        let fmt = dayFormatter()
         let rows = (try? db.run("""
-        SELECT strftime('%Y-%m-%d', m.ts, 'unixepoch', 'localtime') AS d, m.model, COALESCE(SUM(\(cost)),0)
-        \(from) WHERE \(w) GROUP BY 1, 2 ORDER BY 1
+        SELECT \(day), m.model, SUM(\(cost)) AS c
+        \(from) WHERE \(w) GROUP BY 1, 2 HAVING c IS NOT NULL ORDER BY 1
         """, a)) ?? []
         return rows.compactMap { r in fmt.date(from: r.str(0)).map { DayCost(day: $0, model: r.str(1), cost: r.dbl(2)) } }
+    }
+
+    /// Local start-of-day dates that have unpriced tokens.
+    static func unpricedDays(_ db: DB, _ f: Filter) -> Set<Date> {
+        let (w, a) = f.sql()
+        let fmt = dayFormatter()
+        let rows = (try? db.run("SELECT DISTINCT \(day) \(from) WHERE \(w) AND m.cost IS NULL AND p.model IS NULL", a)) ?? []
+        return Set(rows.compactMap { fmt.date(from: $0.str(0)) })
+    }
+
+    static func sessionCount(_ db: DB, _ f: Filter) -> Int {
+        let (w, a) = f.sql()
+        return (try? db.run("SELECT COUNT(DISTINCT m.session) FROM messages m WHERE \(w)", a))?.first?.int(0) ?? 0
     }
 
     static func sessions(_ db: DB, _ f: Filter) -> [SessionRow] {
@@ -147,6 +174,8 @@ final class AppModel: ObservableObject {
     private var cool: Timer?
     private var lastUsage: Double = 0
     private var flickeredFor: Double = 0
+    /// Main thread. Errors from outside the sources, kept across refreshes.
+    private var reported: [String] = []
 
     var caveat: String {
         switch source {
@@ -169,8 +198,15 @@ final class AppModel: ObservableObject {
         if Settings.bedrockEnabled { bedrock.start { [weak self] in self?.refresh() } }
         if Settings.otelEnabled { startOTel() }
         // Cheap SQL; also rolls "today" over at local midnight.
-        timer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in self?.refresh() }
+        timer = Self.common(Timer(timeInterval: 300, repeats: true) { [weak self] _ in self?.refresh() })
         refresh()
+    }
+
+    func report(_ error: String) {
+        DispatchQueue.main.async {
+            self.reported.append(error)
+            self.errors.append(error)
+        }
     }
 
     func setBedrock(_ on: Bool) {
@@ -200,23 +236,28 @@ final class AppModel: ObservableObject {
 
     private func compute() {
         pending = false
+        // `source` belongs to the main thread; its didSet writes the default before calling refresh.
+        let source = UserDefaults.standard.string(forKey: "source") ?? Sources.combined
         let cal = Calendar.current
         var t = Filter(source: source)
         t.from = cal.startOfDay(for: Date())
         var m = t
         m.from = cal.date(from: cal.dateComponents([.year, .month], from: Date()))!
-        let result = db.queue.sync { () -> (Summary, Summary, [Slice], [Slice], [Slice]) in
+        let result = db.queue.sync { () -> (Summary, Summary, [Slice], [Slice], [Slice], String?) in
             pricing.reloadIfChanged(into: db)
             return (Q.summary(db, t), Q.summary(db, m),
                     Q.breakdown(db, t, by: "m.project"),
                     Q.breakdown(db, t, by: "m.model"),
-                    Q.breakdown(db, t, by: "CASE WHEN m.sidechain=1 THEN 'Subagents' ELSE 'Main agent' END"))
+                    Q.breakdown(db, t, by: "CASE WHEN m.sidechain=1 THEN 'Subagents' ELSE 'Main agent' END"), pricing.error)
         }
-        let (src, srcArgs) = Sources.clause(source)
-        let latest = db.queue.sync { (try? db.run("SELECT MAX(m.ts) \(Q.from) WHERE \(src)", srcArgs))?.first?.dbl(0) ?? 0 }
+        let stored = source == Sources.combined ? [Sources.transcripts, Sources.otel] : [source]
+        let latest = db.queue.sync {
+            stored.map { (try? db.run("SELECT MAX(ts) FROM messages WHERE source = ?", [$0]))?.first?.dbl(0) ?? 0 }.max() ?? 0
+        }
         let scanning = (source == Sources.transcripts || source == Sources.combined) && transcripts.scanning
-        let errs = [pricing.error, transcripts.lastError, Settings.bedrockEnabled ? bedrock.lastError : nil, otel?.lastError].compactMap { $0 }
+        let earlier = [result.5, transcripts.lastError, Settings.bedrockEnabled ? bedrock.lastError : nil]
         DispatchQueue.main.async {
+            let errs = (earlier + [self.otel?.lastError]).compactMap { $0 } + self.reported
             // Assigning equal values still fires objectWillChange and re-renders the popover.
             if self.today != result.0 { self.today = result.0 }
             if self.month != result.1 { self.month = result.1 }
@@ -237,16 +278,16 @@ final class AppModel: ObservableObject {
         cool?.invalidate()
         flame.lit = now - lastUsage < Self.litFor
         if flame.lit {
-            cool = Timer.scheduledTimer(withTimeInterval: Self.litFor - (now - lastUsage), repeats: false) { [weak self] _ in
+            cool = Self.common(Timer(timeInterval: Self.litFor - (now - lastUsage), repeats: false) { [weak self] _ in
                 self?.flame.lit = false
-            }
+            })
         }
         guard lastUsage > flickeredFor, flicker == nil else { return }
         let first = flickeredFor == 0
         flickeredFor = lastUsage
-        guard !first, now - lastUsage < 60 else { return }
+        guard !first, now - lastUsage < 60, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { return }
         flame.index = 0
-        flicker = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] t in
+        flicker = Self.common(Timer(timeInterval: 0.1, repeats: true) { [weak self] t in
             guard let self, let i = self.flame.index else { return }
             if i + 1 < FlameGlyph.frames.count {
                 self.flame.index = i + 1
@@ -255,7 +296,13 @@ final class AppModel: ObservableObject {
                 self.flicker = nil
                 self.flame.index = nil
             }
-        }
+        })
+    }
+
+    /// Default-mode timers pause while a menu, like the Source picker, is tracking.
+    private static func common(_ t: Timer) -> Timer {
+        RunLoop.main.add(t, forMode: .common)
+        return t
     }
 
     /// Pauses between tool calls are shorter than this, so the icon doesn't blink grey mid-session.
@@ -291,11 +338,14 @@ enum Settings {
     static func bedrockConfig() -> BedrockLogSource.Config {
         let claude = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude/settings.json")
         let b = ((try? Data(contentsOf: claude)).flatMap { try? JSONSerialization.jsonObject(with: $0) } as? [String: Any])?["bedrock"] as? [String: Any]
+        func pick(_ values: Any?..., or fallback: String) -> String {
+            values.lazy.compactMap { ($0 as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) }.first { !$0.isEmpty } ?? fallback
+        }
         return .init(
-            profile: d.string(forKey: "bedrock.profile") ?? b?["profile"] as? String ?? "default",
-            region: d.string(forKey: "bedrock.region") ?? b?["region"] as? String ?? "us-east-1",
-            logGroup: d.string(forKey: "bedrock.logGroup") ?? "/aws/bedrock/modelinvocations",
-            identity: d.string(forKey: "bedrock.identity") ?? "",
+            profile: pick(d.string(forKey: "bedrock.profile"), b?["profile"], or: "default"),
+            region: pick(d.string(forKey: "bedrock.region"), b?["region"], or: "us-east-1"),
+            logGroup: pick(d.string(forKey: "bedrock.logGroup"), or: "/aws/bedrock/modelinvocations"),
+            identity: pick(d.string(forKey: "bedrock.identity"), or: ""),
             lookbackDays: d.object(forKey: "bedrock.lookbackDays") as? Int ?? 7)
     }
 }

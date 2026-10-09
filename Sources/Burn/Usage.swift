@@ -19,6 +19,18 @@ struct UsageRow {
     var premium = false
 }
 
+/// Status a source writes on its own queue and the refresh queue and views read.
+@propertyWrapper
+final class Locked<T> {
+    private var value: T
+    private let lock = NSLock()
+    init(wrappedValue: T) { value = wrappedValue }
+    var wrappedValue: T {
+        get { lock.withLock { value } }
+        set { lock.withLock { value = newValue } }
+    }
+}
+
 protocol UsageSource: AnyObject {
     var id: String { get }
     var label: String { get }
@@ -31,7 +43,7 @@ protocol UsageSource: AnyObject {
 }
 
 enum Sources {
-    /// Not a stored source: transcripts, switched to telemetry per session once telemetry reports it.
+    /// Not a stored source: every transcript row plus the telemetry rows transcripts don't hold.
     static let combined = "claude-code"
     static let transcripts = "transcripts"
     static let bedrock = "bedrock-logs"
@@ -47,12 +59,12 @@ enum Sources {
         }
     }
 
-    static let combinedCaveat = "Transcripts, switching to Claude Code telemetry for each session from the moment telemetry reports it, which adds the calls transcripts miss. Without telemetry this equals the transcripts."
+    static let combinedCaveat = "Every transcript request, plus the telemetry requests no transcript holds, which are the calls Claude Code doesn't write to transcripts."
 
-    /// WHERE clause for a source. `c` is the otel_cut join in Q.from.
+    /// WHERE clause for a source. `dup` is kept by triggers in DB.
     static func clause(_ id: String) -> (String, [Any?]) {
         guard id == combined else { return ("m.source = ?", [id]) }
-        return ("((m.source = 'transcripts' AND (c.t IS NULL OR m.ts < c.t)) OR m.source = 'otel')", [])
+        return ("(m.source = 'transcripts' OR (m.source = 'otel' AND m.dup = 0))", [])
     }
 }
 

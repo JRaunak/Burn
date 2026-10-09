@@ -11,39 +11,38 @@ struct HistoryView: View {
             HStack(spacing: 24) {
                 stat("Total", usd(h.summary.cost))
                 stat("Tokens", tokens(h.summary.tokens))
-                stat("Active days", "\(Set(h.daily.map(\.day)).count)")
+                stat("Active days", "\(h.chart.activeDays)")
                 if h.summary.unpricedTokens > 0 {
                     VStack(alignment: .leading) {
                         Label("Unpriced tokens", systemImage: "exclamationmark.triangle.fill")
                             .font(.caption).foregroundStyle(.secondary)
                         Text(tokens(h.summary.unpricedTokens)).font(.title2).monospacedDigit()
                     }
+                    .help("No price for \(h.summary.unpricedModels.joined(separator: ", ")). Add them to pricing.json.")
+                }
+                if model.scanning {
+                    HStack(spacing: 6) {
+                        ProgressView().controlSize(.small)
+                        Text("Reading transcripts, totals partial").font(.caption).foregroundStyle(.secondary)
+                    }
                 }
                 Spacer()
             }
-            DailyChart(days: h.daily)
-                .frame(height: 220)
-                .overlay {
-                    if h.loaded && h.daily.isEmpty {
-                        Text("No usage in this range").foregroundStyle(.secondary)
+            .opacity(h.loaded ? 1 : 0.5)
+
+            if h.loaded && h.summary.tokens == 0 {
+                ContentUnavailableView("No usage", systemImage: "chart.bar", description: Text(range))
+            } else {
+                Group {
+                    if h.loaded && h.chart.rows.isEmpty {
+                        ContentUnavailableView("No prices", systemImage: "exclamationmark.triangle",
+                                               description: Text("Every model in \(range) is unpriced: \(h.summary.unpricedModels.joined(separator: ", ")). Add them to pricing.json."))
+                    } else {
+                        DailyChart(h: h)
                     }
                 }
-
-            Table(h.sessions) {
-                TableColumn("Started") { Text($0.start, format: .dateTime.day().month().hour().minute()) }
-                    .width(min: 110, ideal: 120)
-                TableColumn("Project", value: \.project)
-                TableColumn("Session") { s in
-                    Button(String(s.id.prefix(8))) { h.filter.session = h.filter.session == s.id ? "" : s.id }
-                        .buttonStyle(.link)
-                }
-                .width(80)
-                TableColumn("Messages") { Text("\($0.messages)").monospacedDigit() }.width(70)
-                TableColumn("Subagent share") { Text($0.subagentShare, format: .percent.precision(.fractionLength(0))).monospacedDigit() }.width(95)
-                TableColumn("Cost") { s in
-                    Text(usd(s.cost) + (s.unpricedTokens > 0 ? "+" : "")).monospacedDigit()
-                }
-                .width(80)
+                .frame(height: 220)
+                sessions
             }
 
             Text(model.caveat + " A \"+\" means some tokens have no price.")
@@ -59,7 +58,47 @@ struct HistoryView: View {
             h.filter.model = ""
             h.filter.session = ""
         }
+        .onChange(of: h.filter.agent) { h.columns[visibility: "subagent"] = h.filter.agent == .all ? .automatic : .hidden }
         .onChange(of: model.today.cost) { load() }
+    }
+
+    private var sessions: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            if h.sessionCount > h.sessions.count {
+                Text("Top \(h.sessions.count) of \(h.sessionCount) sessions").font(.caption).foregroundStyle(.secondary)
+            }
+            Table(h.sessions, sortOrder: $h.sortOrder, columnCustomization: $h.columns) {
+                TableColumn("First in range", value: \.start) { Text($0.start, format: .dateTime.day().month().hour().minute()) }
+                    .width(min: 110, ideal: 120)
+                TableColumn("Project", value: \.project)
+                TableColumn("Session") { s in
+                    Button(String(s.id.prefix(8))) { h.filter.session = h.filter.session == s.id ? "" : s.id }
+                        .buttonStyle(.link)
+                }
+                .width(80)
+                TableColumn("Messages", value: \.messages) { Text($0.messages, format: .number).monospacedDigit() }
+                    .width(70).alignment(.numeric)
+                TableColumn("Subagent share") { s in
+                    Text(s.cost > 0 ? s.subagentShare.formatted(.percent.precision(.fractionLength(0))) : "–").monospacedDigit()
+                }
+                .width(95).alignment(.numeric).customizationID("subagent")
+                TableColumn("Cost", value: \.cost) { s in
+                    HStack(spacing: 0) {
+                        Text(usd(s.cost))
+                        Text("+").opacity(s.unpricedTokens > 0 ? 1 : 0).accessibilityHidden(s.unpricedTokens == 0)
+                    }
+                    .monospacedDigit()
+                }
+                .width(80).alignment(.numeric)
+            }
+        }
+        .opacity(h.loaded ? 1 : 0.5)
+    }
+
+    private var range: String {
+        let cal = Calendar.current
+        return (cal.startOfDay(for: h.filter.from)..<cal.startOfDay(for: h.filter.to ?? Date()))
+            .formatted(.interval.day().month(.abbreviated).year())
     }
 
     private var filters: some View {
@@ -107,43 +146,148 @@ struct HistoryView: View {
 }
 
 struct DailyChart: View {
-    let days: [DayCost]
+    @ObservedObject var h: HistoryModel
 
     var body: some View {
-        Chart(days) { d in
-            BarMark(x: .value("Day", d.day, unit: .day), y: .value("USD", d.cost))
-                .foregroundStyle(by: .value("Model", d.model))
-        }
-        .chartYAxis {
-            AxisMarks { v in
-                AxisGridLine()
-                AxisValueLabel { Text(usd(v.as(Double.self) ?? 0)) }
+        let c = h.chart
+        Chart {
+            ForEach(c.rows) { d in
+                BarMark(x: .value("Day", d.day, unit: .day), y: .value("USD", d.cost))
+                    .foregroundStyle(by: .value("Model", d.model))
+            }
+            ForEach(c.unpricedDays, id: \.self) { day in
+                PointMark(x: .value("Day", day, unit: .day), y: .value("USD", c.totals[day] ?? 0))
+                    .symbolSize(0)
+                    .annotation(position: .top, spacing: 2) {
+                        Text("+").font(.caption).foregroundStyle(.secondary).accessibilityLabel("Has unpriced tokens")
+                    }
+            }
+            if let day = h.selectedDay.map(Calendar.current.startOfDay), let total = c.totals[day] {
+                RuleMark(x: .value("Day", day, unit: .day))
+                    .foregroundStyle(.secondary.opacity(0.3))
+                    .annotation(position: .top, spacing: 0, overflowResolution: .init(x: .fit(to: .chart), y: .disabled)) {
+                        DayDetail(day: day, rows: c.rows.filter { $0.day == day }, total: total, unpriced: c.unpricedDays.contains(day))
+                    }
             }
         }
+        .chartXScale(domain: c.domain)
+        .chartXAxis {
+            AxisMarks(values: .stride(by: .day, count: c.span <= 14 ? 1 : 7)) {
+                AxisGridLine()
+                AxisValueLabel(format: .dateTime.day().month(.abbreviated))
+            }
+        }
+        .chartYAxis {
+            AxisMarks {
+                AxisGridLine()
+                // Whole dollars would repeat labels on a chart whose ticks are under $1 apart.
+                AxisValueLabel(format: .currency(code: "USD").precision(.fractionLength(c.maxTotal >= 10 ? 0 : 2)))
+            }
+        }
+        .chartForegroundStyleScale(domain: c.models, range: c.models.indices.map { $0 < palette.count ? palette[$0] : Color(nsColor: .systemGray) })
+        .chartLegend(position: .top, alignment: .leading)
+        .chartXSelection(value: $h.selectedDay)
+    }
+}
+
+private struct DayDetail: View {
+    let day: Date
+    let rows: [DayCost]
+    let total: Double
+    let unpriced: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(day, format: .dateTime.weekday().day().month(.abbreviated)).bold()
+            ForEach(rows) { r in
+                HStack { Text(r.model); Spacer(); Text(usd(r.cost)).monospacedDigit() }
+            }
+            Divider()
+            HStack { Text("Total"); Spacer(); Text(usd(total) + (unpriced ? "+" : "")).monospacedDigit() }.bold()
+        }
+        .font(.caption)
+        .frame(width: 200)
+        .padding(8)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 6))
+    }
+}
+
+/// Fixed per rank, so a model keeps its colour while hovering and across reloads of the same range.
+private let palette: [Color] = [
+    (0x2a78d6, 0x3987e5), (0xeb6834, 0xd95926), (0x1baf7a, 0x199e70), (0xeda100, 0xc98500), (0xe87ba4, 0xd55181),
+].map { light, dark in
+    Color(nsColor: NSColor(name: nil) { a in
+        let v = a.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? dark : light
+        return NSColor(srgbRed: CGFloat(v >> 16) / 255, green: CGFloat(v >> 8 & 0xff) / 255, blue: CGFloat(v & 0xff) / 255, alpha: 1)
+    })
+}
+
+/// Chart rows with everything past the top five models merged into "Other".
+struct DailyData {
+    var rows: [DayCost] = []
+    var models: [String] = []
+    var totals: [Date: Double] = [:]
+    var unpricedDays: [Date] = []
+    var domain = Date()...Date()
+    var span = 1
+    var maxTotal = 0.0
+    var activeDays: Int { Set(totals.keys).union(unpricedDays).count }
+
+    init() {}
+
+    init(_ daily: [DayCost], unpriced: Set<Date>, _ f: Filter) {
+        let cal = Calendar.current
+        let start = cal.startOfDay(for: f.from)
+        let end = cal.date(byAdding: .day, value: 1, to: cal.startOfDay(for: f.to ?? Date()))!
+        domain = start...end
+        span = cal.dateComponents([.day], from: start, to: end).day ?? 1
+
+        let ranked = Dictionary(daily.map { ($0.model, $0.cost) }, uniquingKeysWith: +).sorted { $0.value > $1.value }.map(\.key)
+        let top = Array(ranked.prefix(5))
+        var other: [Date: Double] = [:]
+        for d in daily where !top.contains(d.model) { other[d.day, default: 0] += d.cost }
+        models = top + (other.isEmpty ? [] : ["Other"])
+        rows = top.flatMap { m in daily.filter { $0.model == m } }
+            + other.sorted { $0.key < $1.key }.map { DayCost(day: $0.key, model: "Other", cost: $0.value) }
+        totals = Dictionary(daily.map { ($0.day, $0.cost) }, uniquingKeysWith: +)
+        maxTotal = totals.values.max() ?? 0
+        unpricedDays = unpriced.sorted()
     }
 }
 
 /// Holds view state in an ObservableObject because the CLT SDK lacks the plugin behind SwiftUI's @State macro.
 final class HistoryModel: ObservableObject {
     @Published var filter = Filter()
+    @Published var selectedDay: Date?
+    @Published var sortOrder = [KeyPathComparator(\SessionRow.cost, order: .reverse)] {
+        didSet { sessions.sort(using: sortOrder) }
+    }
+    @Published var columns = TableColumnCustomization<SessionRow>()
     @Published var summary = Summary()
-    @Published var daily: [DayCost] = []
+    @Published var chart = DailyData()
     @Published var sessions: [SessionRow] = []
+    @Published var sessionCount = 0
     @Published var projects: [String] = []
     @Published var models: [String] = []
-    @Published var loaded = false
+    /// The filter the data above was loaded for.
+    @Published private var shown: Filter?
+
+    var loaded: Bool { shown == filter }
 
     func load(_ db: DB) {
         let f = filter
         DispatchQueue.global(qos: .userInitiated).async {
             let r = db.queue.sync {
-                (Q.summary(db, f), Q.daily(db, f), Q.sessions(db, f),
+                (Q.summary(db, f), Q.daily(db, f), Q.unpricedDays(db, f), Q.sessions(db, f), Q.sessionCount(db, f),
                  Q.distinct(db, "project", source: f.source), Q.distinct(db, "model", source: f.source))
             }
+            let chart = DailyData(r.1, unpriced: r.2, f)
             DispatchQueue.main.async {
                 guard f == self.filter else { return }
-                (self.summary, self.daily, self.sessions, self.projects, self.models) = r
-                self.loaded = true
+                if self.shown != f { self.selectedDay = nil }
+                (self.summary, self.chart, self.sessionCount, self.projects, self.models) = (r.0, chart, r.4, r.5, r.6)
+                self.sessions = r.3.sorted(using: self.sortOrder)
+                self.shown = f
             }
         }
     }

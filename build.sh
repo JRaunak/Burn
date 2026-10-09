@@ -35,6 +35,8 @@ echo "built $app"
 if [ "${1:-}" = install ]; then
     mkdir -p "$HOME/Applications"
     pkill -x Burn 2>/dev/null || true
+    # open would just activate the old process if it's still exiting.
+    while pgrep -x Burn >/dev/null; do sleep 0.1; done
     rm -rf "$HOME/Applications/Burn.app"
     cp -R "$app" "$HOME/Applications/"
     open "$HOME/Applications/Burn.app"

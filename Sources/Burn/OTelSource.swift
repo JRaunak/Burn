@@ -7,7 +7,7 @@ final class OTelSource: UsageSource {
     let id = Sources.otel
     let label = "Claude Code telemetry"
     let caveat = "Cost as Claude Code reports it per request, including calls it doesn't write to transcripts. Only covers time since telemetry was turned on."
-    private(set) var lastError: String?
+    @Locked private(set) var lastError: String?
 
     private let db: DB
     private let port: UInt16
@@ -56,8 +56,9 @@ final class OTelSource: UsageSource {
             var buf = buf
             if let chunk { buf.append(chunk) }
             if let (path, body) = Self.request(buf) {
-                if path.hasPrefix("/v1/logs") { self.ingest(body) }
-                let resp = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}"
+                let ok = !path.hasPrefix("/v1/logs") || self.ingest(body)
+                // A 5xx makes the exporter retry the batch.
+                let resp = "HTTP/1.1 \(ok ? "200 OK" : "500 Internal Server Error")\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}"
                 c.send(content: Data(resp.utf8), completion: .contentProcessed { _ in c.cancel() })
             } else if done || err != nil || buf.count > 32 << 20 {
                 c.cancel()
@@ -84,8 +85,9 @@ final class OTelSource: UsageSource {
         return (path, Data(body.prefix(length)))
     }
 
-    private func ingest(_ body: Data) {
-        guard let root = try? JSONSerialization.jsonObject(with: body) as? [String: Any] else { return }
+    /// False only when the rows couldn't be stored.
+    private func ingest(_ body: Data) -> Bool {
+        guard let root = try? JSONSerialization.jsonObject(with: body) as? [String: Any] else { return true }
         var rows: [UsageRow] = []
         for rl in root["resourceLogs"] as? [[String: Any]] ?? [] {
             for sl in rl["scopeLogs"] as? [[String: Any]] ?? [] {
@@ -94,18 +96,25 @@ final class OTelSource: UsageSource {
                 }
             }
         }
-        guard !rows.isEmpty else { return }
-        db.queue.sync {
-            try? db.transaction {
-                for var r in rows {
-                    if let p = try db.run("SELECT project FROM sessions WHERE id=?", [r.session]).first {
-                        r.project = p.str(0)
+        guard !rows.isEmpty else { return true }
+        do {
+            try db.queue.sync {
+                try db.transaction {
+                    for var r in rows {
+                        if let p = try db.run("SELECT project FROM sessions WHERE id=?", [r.session]).first {
+                            r.project = p.str(0)
+                        }
+                        try db.upsert(r)
                     }
-                    try db.upsert(r)
                 }
             }
+        } catch {
+            lastError = "Telemetry: \(error)"
+            return false
         }
+        lastError = nil
         onChange()
+        return true
     }
 
     private func row(_ rec: [String: Any]) -> UsageRow? {

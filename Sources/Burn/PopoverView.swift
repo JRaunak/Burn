@@ -81,6 +81,7 @@ struct SliceList: View {
                         Text(usd(s.cost)).monospacedDigit()
                     }
                     .font(.callout)
+                    .accessibilityElement(children: .combine)
                 }
             }
         }

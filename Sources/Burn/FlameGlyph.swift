@@ -128,6 +128,8 @@ enum FlameGlyph {
         let img = NSImage(size: rep.size)
         img.addRepresentation(rep)
         img.isTemplate = template
+        // Colour is the only sign that spend is landing, so VoiceOver says it too.
+        img.accessibilityDescription = template ? "Burn" : "Burn, spending"
         return img
     }
 }

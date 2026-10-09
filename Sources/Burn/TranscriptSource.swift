@@ -5,8 +5,8 @@ final class TranscriptSource: UsageSource {
     let id = Sources.transcripts
     let label = "Claude Code transcripts"
     let caveat = "Only usage Claude Code wrote to ~/.claude/projects. Background calls it doesn't log, and transcripts deleted before Burn first ran, are missing."
-    private(set) var lastError: String?
-    private(set) var scanning = false
+    @Locked private(set) var lastError: String?
+    @Locked private(set) var scanning = false
 
     private let db: DB
     let endpoints = Endpoints()
@@ -67,13 +67,9 @@ final class TranscriptSource: UsageSource {
         scanning = db.queue.sync { (try? db.run("SELECT COUNT(*) FROM files"))?.first?.int(0) ?? 0 } == 0
         if scanning { onChange() }
         defer { scanning = false; onChange() }
-        var any = false
-        for case let url as URL in e where url.pathExtension == "jsonl" {
-            any = ingest(url) || any
-        }
+        for case let url as URL in e where url.pathExtension == "jsonl" { ingest(url) }
         // The first full scan leaves hundreds of MB of freed large blocks cached by malloc.
         malloc_zone_pressure_relief(nil, 0)
-        _ = any
     }
 
     /// Reads whatever was appended since the stored offset. Returns true if rows were written.
@@ -119,13 +115,14 @@ final class TranscriptSource: UsageSource {
                 try db.transaction {
                     for r in rows {
                         try db.upsert(r)
+                        guard !r.session.isEmpty else { continue }
                         try db.run("""
                         INSERT INTO sessions(id,project,first_ts,last_ts) VALUES(?,?,?,?)
                         ON CONFLICT(id) DO UPDATE SET first_ts=MIN(first_ts,excluded.first_ts), last_ts=MAX(last_ts,excluded.last_ts)
                         """, [r.session, r.project, r.ts, r.ts])
                     }
                     // Telemetry can arrive before its session's transcript; name its project once it's known.
-                    for (session, project) in Dictionary(rows.map { ($0.session, $0.project) }, uniquingKeysWith: { a, _ in a }) {
+                    for (session, project) in Dictionary(rows.lazy.filter { !$0.session.isEmpty }.map { ($0.session, $0.project) }, uniquingKeysWith: { a, _ in a }) {
                         try db.run("UPDATE messages SET project=? WHERE source='otel' AND session=? AND project=''", [project, session])
                     }
                     try db.run("""
