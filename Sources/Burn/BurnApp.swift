@@ -24,18 +24,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private let popover = NSPopover()
     private var subs: Set<AnyCancellable> = []
     private var outsideClicks: Any?
+    /// An off-screen copy of the popover content at its natural height, used only for measuring.
+    private var sizer: NSHostingView<AnyView>!
 
     func applicationDidFinishLaunching(_ note: Notification) {
         Windows.shared.model = model
         LoginItem.registerOnFirstLaunch()
         popover.behavior = .transient
         popover.delegate = self
-        let hosting = NSHostingController(rootView: AnyView(PopoverView(close: { [weak self] in
-            self?.popover.performClose(nil)
-        }).environmentObject(model)))
+        let content = { [unowned self] in
+            PopoverView(close: { [weak self] in self?.popover.performClose(nil) }).environmentObject(model)
+        }
         // Size is set by hand: every automatic resize re-anchors the popover, and over a fullscreen
-        // app (menu bar hidden) that re-anchoring makes it jump.
+        // app (menu bar hidden) that re-anchoring makes it jump. Content is pinned to the top so
+        // spare height sits at the bottom.
+        let hosting = NSHostingController(rootView: AnyView(content().frame(maxHeight: .infinity, alignment: .top)))
         hosting.sizingOptions = []
+        sizer = NSHostingView(rootView: AnyView(content().fixedSize(horizontal: false, vertical: true)))
         popover.contentViewController = hosting
         model.objectWillChange
             .debounce(for: .milliseconds(50), scheduler: RunLoop.main)
@@ -67,7 +72,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             popover.performClose(nil)
         } else {
             model.refresh()
-            if let view = popover.contentViewController?.view { popover.contentSize = view.fittingSize }
+            popover.contentSize = sizer.fittingSize
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             popover.contentViewController?.view.window?.makeKey()
             // .transient only sees clicks inside this app; an accessory app is rarely the active one,
@@ -80,8 +85,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     /// While open, the popover only grows; shorter content leaves space at the bottom instead of moving it.
     private func growToFit() {
-        guard popover.isShown, let view = popover.contentViewController?.view else { return }
-        let fit = view.fittingSize
+        guard popover.isShown else { return }
+        let fit = sizer.fittingSize
         if fit.height > popover.contentSize.height + 0.5 {
             popover.contentSize = NSSize(width: popover.contentSize.width, height: fit.height)
         }

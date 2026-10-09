@@ -61,7 +61,6 @@ struct PopoverView: View {
         }
         .padding(14)
         .frame(width: 320)
-        .frame(maxHeight: .infinity, alignment: .top)
     }
 }
 
