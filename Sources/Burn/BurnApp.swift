@@ -197,7 +197,10 @@ final class Windows: NSObject, NSWindowDelegate {
         } else {
             (title, view) = ("Burn Settings", AnyView(SettingsView().environmentObject(model)))
         }
-        let w = NSWindow(contentViewController: NSHostingController(rootView: view))
+        let hosting = NSHostingController(rootView: view)
+        let w = NSWindow(contentViewController: hosting)
+        // The window starts at 1x32 and SwiftUI sizes it later, so size it before centring.
+        w.setContentSize(hosting.view.fittingSize)
         w.title = title
         w.isReleasedWhenClosed = false
         // Follow the user to the current Space instead of switching back to the window's old one.
@@ -216,7 +219,9 @@ final class Windows: NSObject, NSWindowDelegate {
     private func place(_ w: NSWindow, on screen: NSScreen?) {
         guard let area = screen?.visibleFrame else { return w.center() }
         let size = w.frame.size
-        w.setFrameOrigin(NSPoint(x: area.midX - size.width / 2, y: area.midY - size.height / 2))
+        let x = max(min(area.midX - size.width / 2, area.maxX - size.width), area.minX)
+        let y = min(max(area.midY - size.height / 2, area.minY), area.maxY - size.height)
+        w.setFrameOrigin(NSPoint(x: x, y: y))
     }
 
     /// Closing discards the window, so filters and other view state start fresh next time.
