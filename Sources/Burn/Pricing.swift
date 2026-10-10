@@ -6,8 +6,11 @@ final class Pricing {
     /// Not nil, so a missing pricing.json is reported on the first load instead of skipped.
     private var loadedMTime: Date? = .distantPast
     private(set) var error: String?
+    private let reportedIsFinal: Bool
 
-    init(dir: URL) {
+    /// `reportedIsFinal`: Claude Code prices telemetry with its own table, so reported costs get no premium.
+    init(dir: URL, reportedIsFinal: Bool) {
+        self.reportedIsFinal = reportedIsFinal
         url = dir.appendingPathComponent("pricing.json")
         if !FileManager.default.fileExists(atPath: url.path) {
             let bundled = Bundle.main.url(forResource: "pricing", withExtension: "json")
@@ -35,13 +38,20 @@ final class Pricing {
                         guard let v = o[k] as? NSNumber else { throw DBError(description: "\(model) is missing \(k)") }
                         return v.doubleValue
                     }
-                    let tier = p["above"] as? [String: Any]
-                    let tierArgs: [Any?] = try tier.map {
-                        [try n($0, "tokens"), try n($0, "input"), try n($0, "output"), try n($0, "cacheWrite"), try n($0, "cacheRead")]
-                    } ?? [nil, nil, nil, nil, nil]
-                    try db.run("INSERT INTO prices VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-                               [normalizeModel(model), try n(p, "input"), try n(p, "output"),
-                                try n(p, "cacheWrite"), try n(p, "cacheRead"), p["source"] as? String ?? ""] + tierArgs + [mult])
+                    // A missing cacheWrite1h is the documented 2x input, so older pricing.json files stay right.
+                    func prices(_ o: [String: Any]) throws -> [Any?] {
+                        let input = try n(o, "input")
+                        return [input, try n(o, "output"), try n(o, "cacheWrite"),
+                                (o["cacheWrite1h"] as? NSNumber)?.doubleValue ?? 2 * input, try n(o, "cacheRead")]
+                    }
+                    let tierArgs: [Any?] = try (p["above"] as? [String: Any]).map { [try n($0, "tokens")] + (try prices($0)) }
+                        ?? [nil, nil, nil, nil, nil, nil]
+                    try db.run("""
+                    INSERT INTO prices(model, input, output, cache_write, cache_write_1h, cache_read, note,
+                        tier_tokens, t_input, t_output, t_cache_write, t_cache_write_1h, t_cache_read, mult, reported_mult)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    """, [normalizeModel(model)] + (try prices(p)) + [p["source"] as? String ?? ""] + tierArgs
+                        + [mult, reportedIsFinal ? 1 : mult])
                 }
             }
             error = nil

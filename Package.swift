@@ -9,6 +9,7 @@ let package = Package(
             name: "Burn",
             path: "Sources/Burn",
             linkerSettings: [.linkedLibrary("sqlite3")]
-        )
+        ),
+        .testTarget(name: "BurnTests", dependencies: ["Burn"], path: "Tests/BurnTests"),
     ]
 )

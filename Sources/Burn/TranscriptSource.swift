@@ -59,7 +59,7 @@ final class TranscriptSource: UsageSource {
         stream = s
     }
 
-    private func scanAll() {
+    func scanAll() {
         guard let e = FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil) else { return }
         // Only a scan with nothing stored yet shows as indexing; a launch-time catch-up is quick.
         scanning = db.queue.sync { (try? db.run("SELECT COUNT(*) FROM files"))?.first?.int(0) ?? 0 } == 0
@@ -72,7 +72,7 @@ final class TranscriptSource: UsageSource {
 
     /// Reads whatever was appended since the stored offset. Returns true if rows were written.
     @discardableResult
-    private func ingest(_ url: URL) -> Bool {
+    func ingest(_ url: URL) -> Bool {
         let path = url.path
         guard let attrs = try? FileManager.default.attributesOfItem(atPath: path),
               let size = (attrs[.size] as? NSNumber)?.intValue,
@@ -111,9 +111,8 @@ final class TranscriptSource: UsageSource {
         db.queue.sync {
             do {
                 try db.transaction {
-                    for r in rows {
-                        try db.upsert(r)
-                        guard !r.session.isEmpty else { continue }
+                    try db.store(rows)
+                    for r in rows where !r.session.isEmpty {
                         try db.run("""
                         INSERT INTO sessions(id,project,first_ts,last_ts) VALUES(?,?,?,?)
                         ON CONFLICT(id) DO UPDATE SET first_ts=MIN(first_ts,excluded.first_ts), last_ts=MAX(last_ts,excluded.last_ts)
@@ -170,7 +169,10 @@ final class TranscriptSource: UsageSource {
             input: n("input_tokens"),
             output: n("output_tokens"),
             cacheWrite: n("cache_creation_input_tokens"),
+            // Lines without the cache_creation breakdown count every write as 5-minute.
+            cacheWrite1h: ((u["cache_creation"] as? [String: Any])?["ephemeral_1h_input_tokens"] as? NSNumber)?.intValue ?? 0,
             cacheRead: n("cache_read_input_tokens"),
+            requestID: d["requestId"] as? String,
             premium: endpoints.premium(provider: Endpoints.provider(messageID: mid), model: model, geo: u["inference_geo"] as? String)
         )
     }

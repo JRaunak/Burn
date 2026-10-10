@@ -33,6 +33,7 @@ final class DB {
             input REAL NOT NULL,
             output REAL NOT NULL,
             cache_write REAL NOT NULL,
+            cache_write_1h REAL NOT NULL,
             cache_read REAL NOT NULL,
             note TEXT NOT NULL DEFAULT '',
             -- Prompts over tier_tokens (input + cache write + cache read) pay the t_ prices.
@@ -40,9 +41,12 @@ final class DB {
             t_input REAL,
             t_output REAL,
             t_cache_write REAL,
+            t_cache_write_1h REAL,
             t_cache_read REAL,
             -- pricing.json's regionalPremium, applied to messages flagged premium.
-            mult REAL NOT NULL DEFAULT 1
+            mult REAL NOT NULL DEFAULT 1,
+            -- The same for costs telemetry reported, which are list price unless Claude Code has its own table.
+            reported_mult REAL NOT NULL DEFAULT 1
         );
         """)
     }
@@ -90,37 +94,39 @@ final class DB {
             // Re-reading every transcript fills the new column through the upsert.
             try db.exec("ALTER TABLE messages ADD COLUMN premium INTEGER NOT NULL DEFAULT 0; DELETE FROM files;")
         },
+        // Step 3 used to add messages.dup and token-matching triggers, which step 4 replaces with DB.merge.
         { db in
-            if try !db.columns("messages").contains("dup") {
-                try db.exec("ALTER TABLE messages ADD COLUMN dup INTEGER NOT NULL DEFAULT 0")
-            }
-            // dup marks a telemetry row whose call the transcripts also hold: same session and identical tokens.
-            // Two distinct untracked calls with identical tokens in one session count once.
-            let match = """
-                session = NEW.session AND input = NEW.input AND output = NEW.output
-                AND cache_write = NEW.cache_write AND cache_read = NEW.cache_read
-                """
             try db.exec("""
             DROP VIEW IF EXISTS otel_cut;
             DROP INDEX IF EXISTS messages_session;
             CREATE INDEX IF NOT EXISTS messages_match ON messages(session, source, output);
+            """)
+        },
+        { db in
+            let cols = try db.columns("messages")
+            if !cols.contains("request_id") {
+                try db.exec("""
+                ALTER TABLE messages ADD COLUMN request_id TEXT;
+                ALTER TABLE messages ADD COLUMN cache_write_1h INTEGER NOT NULL DEFAULT 0;
+                ALTER TABLE messages ADD COLUMN partner TEXT;
+                """)
+            }
+            try db.exec("""
             DROP TRIGGER IF EXISTS messages_dup_otel;
             DROP TRIGGER IF EXISTS messages_dup_cc;
             DROP TRIGGER IF EXISTS messages_dup_cc_output;
-            CREATE TRIGGER messages_dup_otel AFTER INSERT ON messages WHEN NEW.source = 'otel'
-                AND EXISTS (SELECT 1 FROM messages WHERE source = 'transcripts' AND \(match))
-            BEGIN UPDATE messages SET dup = 1 WHERE id = NEW.id; END;
-            CREATE TRIGGER messages_dup_cc AFTER INSERT ON messages WHEN NEW.source = 'transcripts'
-            BEGIN UPDATE messages SET dup = 1 WHERE source = 'otel' AND dup = 0 AND \(match); END;
-            -- Streaming repeats a transcript message while its output grows; telemetry carries the final count.
-            CREATE TRIGGER messages_dup_cc_output AFTER UPDATE OF output ON messages
-                WHEN NEW.source = 'transcripts' AND NEW.output != OLD.output
-            BEGIN UPDATE messages SET dup = 1 WHERE source = 'otel' AND dup = 0 AND \(match); END;
-            UPDATE messages SET dup = 1 WHERE source = 'otel' AND EXISTS (
-                SELECT 1 FROM messages t WHERE t.source = 'transcripts' AND t.session = messages.session
-                AND t.input = messages.input AND t.output = messages.output
-                AND t.cache_write = messages.cache_write AND t.cache_read = messages.cache_read);
+            CREATE INDEX IF NOT EXISTS messages_request ON messages(request_id) WHERE request_id IS NOT NULL;
+            -- Synthetic ids (session:ts:output) have colons; Bedrock and API request ids don't.
+            UPDATE messages SET request_id = substr(id, 6)
+                WHERE source = 'otel' AND request_id IS NULL AND instr(substr(id, 6), ':') = 0;
+            -- The re-read fills request_id and cache_write_1h through the upsert and merges as it goes.
+            DELETE FROM files;
             """)
+            if cols.contains("dup") { try db.exec("ALTER TABLE messages DROP COLUMN dup") }
+            // Transcripts already deleted from disk are never re-read, so they pair here, by tokens and time.
+            for r in try db.run("SELECT id FROM messages WHERE source = 'otel' AND partner IS NULL ORDER BY ts") {
+                try db.merge(r.str(0))
+            }
         },
     ]
 

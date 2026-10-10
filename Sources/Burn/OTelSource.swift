@@ -87,7 +87,7 @@ final class OTelSource: UsageSource {
     }
 
     /// False only when the rows couldn't be stored.
-    private func ingest(_ body: Data) -> Bool {
+    func ingest(_ body: Data) -> Bool {
         guard let root = try? JSONSerialization.jsonObject(with: body) as? [String: Any] else { return true }
         var rows: [UsageRow] = []
         for rl in root["resourceLogs"] as? [[String: Any]] ?? [] {
@@ -101,12 +101,12 @@ final class OTelSource: UsageSource {
         do {
             try db.queue.sync {
                 try db.transaction {
-                    for var r in rows {
-                        if let p = try db.run("SELECT project FROM sessions WHERE id=?", [r.session]).first {
-                            r.project = p.str(0)
+                    for i in rows.indices {
+                        if let p = try db.run("SELECT project FROM sessions WHERE id=?", [rows[i].session]).first {
+                            rows[i].project = p.str(0)
                         }
-                        try db.upsert(r)
                     }
+                    try db.store(rows)
                 }
             }
         } catch {
@@ -118,7 +118,7 @@ final class OTelSource: UsageSource {
         return true
     }
 
-    private func row(_ rec: [String: Any]) -> UsageRow? {
+    func row(_ rec: [String: Any]) -> UsageRow? {
         var a: [String: Any] = [:]
         for kv in rec["attributes"] as? [[String: Any]] ?? [] {
             guard let k = kv["key"] as? String, let v = kv["value"] as? [String: Any] else { continue }
@@ -140,16 +140,16 @@ final class OTelSource: UsageSource {
         let nanos = Double(rec["timeUnixNano"] as? String ?? "") ?? 0
         let ts = (a["event.timestamp"] as? String).flatMap(parseISO) ?? (nanos > 0 ? nanos / 1e9 : Date().timeIntervalSince1970)
         let session = a["session.id"] as? String ?? ""
-        let rid = a["request_id"] as? String ?? "\(session):\(ts):\(n("output_tokens"))"
+        let rid = a["request_id"] as? String
         return UsageRow(
-            id: "otel:" + rid, source: id, session: session,
+            id: "otel:" + (rid ?? "\(session):\(ts):\(n("output_tokens"))"), source: id, session: session,
             model: normalizeModel(model), ts: ts,
             sidechain: (a["query_source"] as? String) == "subagent",
             agent: a["query_source"] as? String ?? "",
             input: n("input_tokens"), output: n("output_tokens"),
-            cacheWrite: n("cache_creation_tokens"), cacheRead: n("cache_read_tokens"),
+            cacheWrite: n("cache_creation_tokens"), cacheRead: n("cache_read_tokens"), requestID: rid,
             // Telemetry reports the short model name, so the configured provider's rule decides.
-            cost: d("cost_usd"),
+            cost: a["cost_usd_micros"] != nil ? Double(n("cost_usd_micros")) / 1e6 : d("cost_usd"),
             premium: Endpoints.isRegional(model) || endpoints.premium(provider: endpoints.configured, model: model, geo: nil))
     }
 }

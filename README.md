@@ -57,9 +57,12 @@ cd Burn
 | `./build.sh` | Builds release and writes an ad-hoc signed `build/Burn.app` |
 | `./build.sh install` | Also quits a running Burn, copies the app to `~/Applications/Burn.app`, and opens it |
 | `swift build` | Debug compile check only, no app bundle |
+| `scripts/test.sh` | Runs the tests; extra arguments go to `swift test` |
 | `scripts/make-icon.sh` | Regenerates the app icon from `FlameGlyph.swift` (see [Icon](#icon)) |
 
 `BURN_VERSION=0.2 ./build.sh` sets the version shown in Finder. There are no third-party dependencies; Burn links the system SQLite.
+
+Use `scripts/test.sh` rather than plain `swift test`. Under the Command Line Tools, `swift test` finds the Swift Testing macro plugin only on some clean builds, so the script passes the toolchain's plugin path to it.
 
 ## What it shows
 
@@ -87,7 +90,9 @@ The chart shows daily cost stacked by model. Below it, the 500 most expensive se
 
 ## What it counts
 
-Every total in Burn counts every transcript row, plus the telemetry rows that have no matching transcript row (same session and same token counts). Those are the calls Claude Code never writes to transcripts. Without telemetry the totals are the transcripts alone.
+Every total in Burn counts every transcript row, plus the telemetry rows that match no transcript row. Those are the calls Claude Code never writes to transcripts. Without telemetry the totals are the transcripts alone.
+
+A request in both sources counts once, as the transcript row, which knows the project and agent. The two are matched by request id, which Claude Code writes on both the transcript line (`requestId`) and the telemetry event (`request_id`). An older transcript line without one pairs with at most one telemetry row, and only one with the same session and model, all four token counts equal, and a timestamp within 120 seconds; the nearest wins. The matched transcript row takes telemetry's cost, including $0, because telemetry knows how long each cache write lasts. Unmatched telemetry rows count at their own cost.
 
 ```mermaid
 flowchart LR
@@ -103,7 +108,7 @@ Burn reads `~/.claude/projects/**/*.jsonl`. It watches the folder with FSEvents 
 
 Claude Code deletes old transcripts after its retention period, so history from before Burn's first run is limited to what was still on disk. Rows already in Burn's database stay after the files are deleted.
 
-Calls Claude Code doesn't write to transcripts are missing, and they're real money. In one session Claude Code's own records counted 470,208 uncached Opus input tokens that its transcripts showed as 376, so Burn read about 18% under the statusline. Telemetry receives those calls, and Burn adds them on top of the transcripts. Two different untracked calls with identical token counts in one session would count once.
+Calls Claude Code doesn't write to transcripts are missing, and they're real money. In one session Claude Code's own records counted 470,208 uncached Opus input tokens that its transcripts showed as 376, so Burn read about 18% under the statusline. Telemetry receives those calls, and Burn adds them on top of the transcripts. Each one counts separately, even when two have identical token counts.
 
 ### Claude Code telemetry (opt-in, localhost only)
 
@@ -129,7 +134,7 @@ Burn refuses to set up telemetry, and says why in Settings, when:
 - `OTEL_LOGS_EXPORTER` includes `none`
 - `~/.claude/settings.json` isn't valid JSON with an `env` object
 
-Burn records the `cost_usd` of each `api_request` event, so telemetry rows use Claude Code's own per-request cost rather than the prices in `pricing.json`. It covers only the time since telemetry was set up. Telemetry events carry a short model name, so whether a request paid the regional premium is decided by the provider Claude Code is configured for (see [Regional pricing](#regional-pricing)). The main agent vs subagent split is unreliable for telemetry: Burn counts an event as subagent usage only when its `query_source` is `subagent`, and Agent SDK sessions report `sdk`.
+Burn records the cost of each `api_request` event (`cost_usd_micros`, or `cost_usd` when that's missing), so telemetry rows, and the transcript rows they match, use Claude Code's own per-request cost rather than the prices in `pricing.json`. It covers only the time since telemetry was set up. Telemetry events carry a short model name, so whether a request paid the regional premium is decided by the provider Claude Code is configured for (see [Regional pricing](#regional-pricing)). Claude Code's cost is list price, so Burn applies the premium to it once, on the row that is counted. If `~/.claude/settings.json` has a `modelPricing` table, Claude Code prices from that instead, and Burn adds no premium to telemetry costs; it checks this at launch. The main agent vs subagent split is unreliable for telemetry: Burn counts an event as subagent usage only when its `query_source` is `subagent`, and Agent SDK sessions report `sdk`.
 
 ## Spend alerts
 
@@ -156,19 +161,19 @@ Claude Code transcripts record tokens, not dollars, so Burn prices each assistan
 
 ### pricing.json
 
-Prices come from `~/Library/Application Support/Burn/pricing.json`, in USD per million tokens with `input`, `output`, `cacheWrite`, and `cacheRead` per model. Open it from Settings with "Open pricing.json". Burn re-reads it when its modification time changes, which it checks on each refresh (new usage, opening the popover, or every 5 minutes). Model keys are matched after stripping region prefixes, `anthropic.`, `[1m]`, date suffixes, and `-v1:0`, so `us.anthropic.claude-haiku-4-5-20251001-v1:0` matches `claude-haiku-4-5`.
+Prices come from `~/Library/Application Support/Burn/pricing.json`, in USD per million tokens with `input`, `output`, `cacheWrite` (5-minute cache writes), `cacheWrite1h` (1-hour cache writes), and `cacheRead` per model. Open it from Settings with "Open pricing.json". Burn re-reads it when its modification time changes, which it checks on each refresh (new usage, opening the popover, or every 5 minutes). Model keys are matched after stripping region prefixes, `anthropic.`, `[1m]`, date suffixes, and `-v1:0`, so `us.anthropic.claude-haiku-4-5-20251001-v1:0` matches `claude-haiku-4-5`.
 
 The bundled `Resources/pricing.json` is only copied there when the file doesn't exist. Updating or rebuilding Burn with a new one doesn't change the file you already have; edit it, or delete it to get the new one.
 
-The shipped prices for Opus 5.5, Opus 4.8, Sonnet 5 and Haiku 4.5 were fitted from Claude Code's own cost-state records, so they match the cost in Claude Code's statusline. The rest come from Anthropic's pricing page, and the fitted ones match it too. All of them are list prices.
+The shipped prices are list prices from Anthropic's pricing page. For Opus 5.5, Opus 4.8, Sonnet 5 and Haiku 4.5, the input, output, 5-minute write, and read prices were also fitted from Claude Code's own cost-state records and match the page. The 1-hour write prices come from the page only.
 
 Haiku 5.5 costs more for prompts over 100,000 tokens. An `above` block in `pricing.json` gives those prices, and Burn applies them per request when input plus cache write plus cache read tokens exceed the block's `tokens`.
 
-All cache writes are priced at the `cacheWrite` rate. 1-hour cache writes aren't priced separately.
+Transcripts split each message's cache writes into 5-minute and 1-hour, and Burn stores and prices the two separately. A model without `cacheWrite1h` (in its `above` block too) uses 2 × its `input` price, Anthropic's documented multiplier, so an older `pricing.json` needs no edit. Burn re-reads the transcripts still on disk to fill in the split; rows whose transcript is already gone, and lines with no breakdown, count all their writes as 5-minute. Telemetry reports no split, but its cost already reflects it, which is why a matched row takes telemetry's cost.
 
 ### Unpriced models
 
-A model with no price (missing from `pricing.json`, or set to `null`) is never counted as $0. Its tokens are reported as unpriced, the menu-bar total and session costs get a "+", and the popover names the models to add.
+A model with no price (missing from `pricing.json`, or set to `null`) is never counted as $0. Unless telemetry reported a cost for the request, its tokens are reported as unpriced, the menu-bar total and session costs get a "+", and the popover names the models to add.
 
 ### Regional pricing
 
@@ -202,9 +207,9 @@ To start over, quit Burn and delete `usage.db` (and `usage.db-wal` and `usage.db
 
 - macOS refuses to open Burn after a browser download. The archive is quarantined. Install with the `curl` command above instead.
 - "Building from source needs the Command Line Tools." The prebuilt download failed (Intel Mac, or a blocked release host) and the source fallback has no compiler. Run `xcode-select --install`, then the install command again.
-- The total stays at "Indexing…". The first full read of `~/.claude/projects` is running. It shows only when Burn has no stored file offsets: on first run, after you delete `usage.db`, and after "Re-read all transcripts".
+- The total stays at "Indexing…". The first full read of `~/.claude/projects` is running. It shows only when Burn has no stored file offsets: on first run, after you delete `usage.db`, after "Re-read all transcripts", and after an update whose database change re-reads every transcript.
 - A "+" after a total. Some models have no price. The popover names them; add them to `pricing.json`.
-- "pricing.json: … is missing input" (or another field). Every priced model needs all four prices, and an `above` block needs `tokens` too. Until you fix it, Burn keeps the prices from the last good load; after a relaunch every model is unpriced.
+- "pricing.json: … is missing input" (or another field). Every priced model needs `input`, `output`, `cacheWrite`, and `cacheRead` (`cacheWrite1h` is optional), and an `above` block needs `tokens` too. Until you fix it, Burn keeps the prices from the last good load; after a relaunch every model is unpriced.
 - "Can't listen on 127.0.0.1:4318: …" in the popover or Settings. Something else holds the port. `lsof -nP -iTCP:4318 -sTCP:LISTEN` shows what; stop it, or remove Burn's telemetry setup.
 - Telemetry is set up but adds nothing. It applies only to Claude Code sessions started after setup; restart the session.
 - "Your organization's managed settings control Claude Code telemetry, so Burn can't receive it." Managed settings win over `~/.claude/settings.json`, and Burn doesn't touch them. The totals are the transcripts alone.

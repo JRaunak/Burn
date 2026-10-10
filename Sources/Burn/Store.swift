@@ -57,11 +57,16 @@ struct Summary: Equatable {
 enum Q {
     static let from = "FROM messages m LEFT JOIN prices p ON p.model = m.model"
     private static let tiered = "(p.tier_tokens IS NOT NULL AND m.input + m.cache_write + m.cache_read > p.tier_tokens)"
+    private static func tokenCost(_ t: String) -> String {
+        "(m.input*p.\(t)input + m.output*p.\(t)output + (m.cache_write - m.cache_write_1h)*p.\(t)cache_write"
+            + " + m.cache_write_1h*p.\(t)cache_write_1h + m.cache_read*p.\(t)cache_read)/1e6"
+    }
+    /// Reported costs are telemetry's, priced at list like Burn's own, so the premium applies once either way.
     static let cost = """
-        (COALESCE(m.cost, CASE WHEN \(tiered)
-            THEN (m.input*p.t_input + m.output*p.t_output + m.cache_write*p.t_cache_write + m.cache_read*p.t_cache_read)/1e6
-            ELSE (m.input*p.input + m.output*p.output + m.cache_write*p.cache_write + m.cache_read*p.cache_read)/1e6 END)
-         * CASE WHEN m.premium = 1 THEN COALESCE(p.mult, (SELECT mult FROM prices LIMIT 1), 1) ELSE 1 END)
+        (CASE WHEN m.cost IS NOT NULL
+            THEN m.cost * CASE WHEN m.premium = 1 THEN COALESCE(p.reported_mult, (SELECT reported_mult FROM prices LIMIT 1), 1) ELSE 1 END
+            ELSE CASE WHEN \(tiered) THEN \(tokenCost("t_")) ELSE \(tokenCost("")) END
+                * CASE WHEN m.premium = 1 THEN COALESCE(p.mult, 1) ELSE 1 END END)
         """
     static let tokens = "(m.input + m.output + m.cache_write + m.cache_read)"
     static let unpriced = "CASE WHEN m.cost IS NULL AND p.model IS NULL THEN \(tokens) ELSE 0 END"
@@ -178,8 +183,8 @@ final class AppModel: ObservableObject {
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Burn")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         do { db = try DB(url: dir.appendingPathComponent("usage.db")) } catch { fatalError("\(error)") }
-        pricing = Pricing(dir: dir)
         transcripts = TranscriptSource(db: db)
+        pricing = Pricing(dir: dir, reportedIsFinal: transcripts.endpoints.customPricing)
         notifier.report = { [weak self] in self?.report($0) }
 
         transcripts.start { [weak self] in self?.refresh() }
